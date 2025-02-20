@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
-//TODO: Game, Board, Move, Rules
+//TODO: Game, Move(фундаментальная проверка шаха при движении любой фигурой кроме короля), Rules
 
     /*          --- ФИГУРА ---         */
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
