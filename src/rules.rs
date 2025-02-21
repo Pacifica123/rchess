@@ -263,5 +263,31 @@ impl RulesUtils {
         false
     }
 
-    // TODO: взятие на проходе
+    pub fn can_capture_en_passant(board: &Board, mycolor: Color, target_pos: &Position) -> bool {
+        // Определяем цвет противника
+        let opponent_color = match mycolor {
+            Color::White => Color::Black,
+            Color::Black => Color::White,
+        };
+
+        // Получаем позицию пешки противника
+        let pawn_pos = Position {
+            file: target_pos.file,
+            rank: if mycolor == Color::White { target_pos.rank - 1 } else { target_pos.rank + 1 },
+        };
+
+        // Проверяем, есть ли пешка противника на нужной позиции
+        if let Some(opponent_pawn) = board.get_piece_at(&pawn_pos) {
+            if opponent_pawn.color == opponent_color && opponent_pawn.piece_type == PieceType::Pawn {
+                // Проверяем, сделала ли пешка противника двойной ход в последнем ходе
+                unimplemented!()
+                // TODO:
+                // if opponent_pawn.last_move_was_double_step {
+                //     return true; // Взятие на проходе возможно
+                // }
+            }
+        }
+
+        false // Взятие на проходе невозможно
+    }
 }

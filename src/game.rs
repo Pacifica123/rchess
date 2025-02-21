@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
-//TODO: Game, Move(фундаментальная проверка шаха при движении любой фигурой кроме короля), Rules
+//TODO: Game(GameState, MoveHistory, GameMode), Move
 
     /*          --- ФИГУРА ---         */
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -65,6 +65,68 @@ impl Board {
         Self{
             pieces: HashMap::new()
         }
+    }
+    pub fn init_by_default(&mut self){
+        // Инициализация белых фигур
+        self.pieces.insert(Position { file: 'a', rank: 1 }, Piece::new(PieceType::Rook, Color::White, Some(Position { file: 'a', rank: 1 })));
+        self.pieces.insert(Position { file: 'b', rank: 1 }, Piece::new(PieceType::Knight, Color::White, Some(Position { file: 'b', rank: 1 })));
+        self.pieces.insert(Position { file: 'c', rank: 1 }, Piece::new(PieceType::Bishop, Color::White, Some(Position { file: 'c', rank: 1 })));
+        self.pieces.insert(Position { file: 'd', rank: 1 }, Piece::new(PieceType::Queen, Color::White, Some(Position { file: 'd', rank: 1 })));
+        self.pieces.insert(Position { file: 'e', rank: 1 }, Piece::new(PieceType::King, Color::White, Some(Position { file: 'e', rank: 1 })));
+        self.pieces.insert(Position { file: 'f', rank: 1 }, Piece::new(PieceType::Bishop, Color::White, Some(Position { file: 'f', rank: 1 })));
+        self.pieces.insert(Position { file: 'g', rank: 1 }, Piece::new(PieceType::Knight, Color::White, Some(Position { file: 'g', rank: 1 })));
+        self.pieces.insert(Position { file: 'h', rank: 1 }, Piece::new(PieceType::Rook, Color::White, Some(Position { file: 'h', rank: 1 })));
+
+        for file in b'a'..=b'h' {
+            self.pieces.insert(Position { file: file as char, rank: 2 }, Piece::new(PieceType::Pawn, Color::White, Some(Position { file: file as char, rank: 2 })));
+        }
+
+        // Инициализация черных фигур
+        self.pieces.insert(Position { file: 'a', rank: 8 }, Piece::new(PieceType::Rook, Color::Black, Some(Position { file: 'a', rank: 8 })));
+        self.pieces.insert(Position { file: 'b', rank: 8 }, Piece::new(PieceType::Knight, Color::Black, Some(Position { file: 'b', rank: 8 })));
+        self.pieces.insert(Position { file: 'c', rank: 8 }, Piece::new(PieceType::Bishop, Color::Black, Some(Position { file: 'c', rank: 8 })));
+        self.pieces.insert(Position { file: 'd', rank: 8 }, Piece::new(PieceType::Queen, Color::Black, Some(Position { file: 'd', rank: 8 })));
+        self.pieces.insert(Position { file: 'e', rank: 8 }, Piece::new(PieceType::King, Color::Black, Some(Position { file: 'e', rank: 8 })));
+        self.pieces.insert(Position { file: 'f', rank: 8 }, Piece::new(PieceType::Bishop, Color::Black, Some(Position { file: 'f', rank: 8 })));
+        self.pieces.insert(Position { file: 'g', rank: 8 }, Piece::new(PieceType::Knight, Color::Black, Some(Position { file: 'g', rank: 8 })));
+        self.pieces.insert(Position { file: 'h', rank: 8 }, Piece::new(PieceType::Rook, Color::Black, Some(Position { file: 'h', rank: 8 })));
+
+        for file in b'a'..=b'h' {
+            self.pieces.insert(Position { file: file as char, rank: 7 }, Piece::new(PieceType::Pawn, Color::Black, Some(Position { file: file as char, rank: 7 })));
+        }
+
+    }
+    /// Вывод доски в консоль
+    pub fn display(&self) {
+        for rank in (1..=8).rev() {
+            print!("{}   ", rank); // Номер строки
+            for file in 'a'..='h' {
+                let pos = Position { file, rank };
+                match self.pieces.get(&pos) {
+                    Some(piece) => {
+                        // Выводим символ фигуры в зависимости от типа и цвета
+                        let symbol = match (piece.piece_type, piece.color) {
+                            (PieceType::King, Color::White) => "♔",
+                            (PieceType::Queen, Color::White) => "♕",
+                            (PieceType::Rook, Color::White) => "♖",
+                            (PieceType::Bishop, Color::White) => "♗",
+                            (PieceType::Knight, Color::White) => "♘",
+                            (PieceType::Pawn, Color::White) => "♙",
+                            (PieceType::King, Color::Black) => "♚",
+                            (PieceType::Queen, Color::Black) => "♛",
+                            (PieceType::Rook, Color::Black) => "♜",
+                            (PieceType::Bishop, Color::Black) => "♝",
+                            (PieceType::Knight, Color::Black) => "♞",
+                            (PieceType::Pawn, Color::Black) => "♟",
+                        };
+                        print!("{} ", symbol);
+                    }
+                    None => print!(". "), // Пустая клетка
+                }
+            }
+            println!(); // Переход на новую строку после каждой линии
+        }
+        println!("    a b c d e f g h"); // Буквы столбцов
     }
     /// получить фигуру по позиции (или ее отсутсвие)
     pub fn get_piece_at(&self, pos: &Position) -> Option<&Piece>{
