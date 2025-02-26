@@ -1,4 +1,4 @@
-use crate::game::{Board, Piece, Position, PieceType, Color};
+use crate::game::{Board, Piece, Position, PieceType, Color, Move};
 
 pub struct Rules;
 impl Rules{
@@ -263,7 +263,7 @@ impl RulesUtils {
         false
     }
 
-    pub fn can_capture_en_passant(board: &Board, mycolor: Color, target_pos: &Position) -> bool {
+    pub fn can_capture_en_passant(board: &Board, mycolor: Color, target_pos: &Position, last_move: Move) -> bool {
         // Определяем цвет противника
         let opponent_color = match mycolor {
             Color::White => Color::Black,
@@ -280,8 +280,9 @@ impl RulesUtils {
         if let Some(opponent_pawn) = board.get_piece_at(&pawn_pos) {
             if opponent_pawn.color == opponent_color && opponent_pawn.piece_type == PieceType::Pawn {
                 // Проверяем, сделала ли пешка противника двойной ход в последнем ходе
-                unimplemented!()
-                // TODO:
+                if last_move.piece.piece_type == PieceType::Pawn && (last_move.new_position.rank).abs_diff(last_move.old_position.rank) == 2 {
+                    return true;
+                }
                 // if opponent_pawn.last_move_was_double_step {
                 //     return true; // Взятие на проходе возможно
                 // }

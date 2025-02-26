@@ -41,13 +41,13 @@ pub struct Piece {
     pub piece_type: PieceType,
     pub color: Color,
     pub pos: Option<Position>,  // None - фигура отсутствует на доске (срублена, фора, другое)
-    pub first_move: bool        // Для пешек и рокировки 
+    pub first_move: bool        // Для пешек и рокировки
 }
 
 impl Piece {
     pub fn new(ptype: PieceType, color: Color, pos: Option<Position>) -> Self{
         Self{
-            piece_type: ptype, 
+            piece_type: ptype,
             color,
             pos,
             first_move:true,
@@ -55,7 +55,7 @@ impl Piece {
     }
 }
     /*          ---  ДОСКА  ---          */
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Board {
     pieces: HashMap<Position, Piece>
 }
@@ -164,3 +164,74 @@ impl Board {
         res
     }
 }
+
+    /*          ---  ХОДЫ  ---          */
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveType {
+    Normal,
+    Capture,    // захват
+    EnPassant,  // взятие на проходе
+    Castling,   // рокировка
+    Promotion,  // превращение пешки
+    Check,       // шах
+    Checkmate,   // мат
+    Stalemate   // пат
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Move {
+    pub piece: Piece,
+    pub old_position: Position,
+    pub new_position: Position,
+    pub captured_piece: Option<PieceType>,
+    pub move_type: MoveType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MoveHistory {
+    pub moves: Vec<Move>,
+}
+
+    /*          ---  ПАРТИЯ  ---          */
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Gamemode {
+    PCvsPC,
+    PCvsPlayer,
+    PlayerVsPlayer
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GameResult {
+    WhiteWin,
+    BlackWin,
+    Draw
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CurrentGameStatus {
+    pub board: Board,
+    pub current_turn: Color, // Цвет игрока, чей ход
+    pub is_gameover: Option<GameResult>,
+
+}
+
+
+/**TODO на будущее:
+ * Таймер для игры на время из времени партии, времени прибавки за ход, времени на ход для движка
+ * Какие-то эвристики и прочие шкалы
+ */
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Game {
+    pub status: CurrentGameStatus,
+    pub history: MoveHistory,
+    gamemode: Gamemode,
+    color_engine: Option<Color> // для режима PCvsPlayer
+
+}
+
+
+pub struct GameUtils;
+// TODO вернуть все возможные ходы для того или иного цвета
+// начать игру можно только по свершению первого хода (надо различать init и start)
