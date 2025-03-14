@@ -1,3 +1,5 @@
+//! rules.rs Правила ходов
+
 use crate::game::{Board, Piece, Position, PieceType, Color, Move};
 
 pub struct Rules;

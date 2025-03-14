@@ -1,8 +1,10 @@
-//! Основная логика игры
+//! game.rs Основная логика игры
 
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+
+use crate::rules;
 
 //TODO: Game(GameState, MoveHistory, GameMode), Move
 
@@ -193,6 +195,12 @@ pub struct MoveHistory {
     pub moves: Vec<Move>,
 }
 
+impl MoveHistory {
+    pub fn new() -> Self{
+        Self{moves: Vec::new()}
+    }
+}
+
     /*          ---  ПАРТИЯ  ---          */
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -228,10 +236,134 @@ pub struct Game {
     pub history: MoveHistory,
     gamemode: Gamemode,
     color_engine: Option<Color> // для режима PCvsPlayer
+}
+
+impl Game {
+    /// Инициализация новой партии
+    pub fn new(gamemode: Gamemode) -> Self {
+        let board = Board::new(); // Предполагается, что Board имеет метод new для инициализации стартовой позиции
+        let current_turn = Color::White; // Стартовый ход белых
+        let status = CurrentGameStatus {
+            board,
+            current_turn,
+            is_gameover: None,
+        };
+        let history = MoveHistory::new(); // Предполагается, что MoveHistory имеет метод new для инициализации пустой истории ходов
+
+        let color_engine = match gamemode {
+            Gamemode::PCvsPlayer => Some(Color::White), // По умолчанию движок играет за белых
+            _ => None,
+        };
+
+        Self {
+            status,
+            history,
+            gamemode,
+            color_engine,
+        }
+    }
+    /// Инициализация новой партии с заданной доской
+    pub fn new_with_board(gamemode: Gamemode, board: Board) -> Self {
+        let current_turn = Color::White; // Стартовый ход белых
+        let status = CurrentGameStatus {
+            board,
+            current_turn,
+            is_gameover: None,
+        };
+        let history = MoveHistory::new();
+
+        let color_engine = match gamemode {
+            Gamemode::PCvsPlayer => Some(Color::White),
+            _ => None,
+        };
+
+        Self {
+            status,
+            history,
+            gamemode,
+            color_engine,
+        }
+    }
+
+    /// Старт партии (может быть использован для дополнительных действий перед началом игры)
+    pub fn start(&mut self) {
+        // Здесь можно добавить дополнительные действия перед началом игры, если необходимо
+        println!("Игра началась!");
+    }
 
 }
 
 
 pub struct GameUtils;
-// TODO вернуть все возможные ходы для того или иного цвета
+impl GameUtils {
+    pub fn get_possible_moves(board: &Board, color: Color, last_move: Option<Move>) -> Vec<Move> {
+        let mut possible_moves = Vec::new();
+
+        // Получить все фигуры заданного цвета
+        let pieces: Vec<Piece> = board
+        .pieces
+        .values()
+        .filter(|piece| piece.color == color)
+        .cloned()
+        .collect();
+
+        for piece in pieces {
+            let from = piece.pos.unwrap();
+
+            // Проверить все 64 клетки доски
+            for file in 'a'..='h' {
+                for rank in 1..=8 {
+                    let to = Position { file, rank };
+
+                    if rules::Rules::can_move(&piece, to, board) {
+                        let captured_piece = if let Some(captured) = board.get_piece_at(&to) {
+                            Some(captured.piece_type)
+                        } else {
+                            None
+                        };
+
+                        let mut move_type = match captured_piece {
+                            Some(_) => MoveType::Capture,
+                            None => MoveType::Normal,
+                        };
+
+                        // Дополнительно проверить на рокировку
+                        if piece.piece_type == PieceType::King {
+                            if rules::RulesUtils::can_castle(board, color, true) && (to.file == 'g' && from.file == 'e') {
+                                move_type = MoveType::Castling;
+                            } else if rules::RulesUtils::can_castle(board, color, false) && (to.file == 'c' && from.file == 'e') {
+                                move_type = MoveType::Castling;
+                            }
+                        }
+
+                        // Проверка на взятие на проходе
+                        if piece.piece_type == PieceType::Pawn && last_move.is_some() {
+                            if rules::RulesUtils::can_capture_en_passant(board, color, &to, last_move.unwrap()) {
+                                move_type = MoveType::EnPassant;
+                            }
+                        }
+
+                        // Проверка на превращение пешки
+                        if piece.piece_type == PieceType::Pawn && to.rank == (if color == Color::White { 8 } else { 1 }) {
+                            move_type = MoveType::Promotion;
+                        }
+
+                        possible_moves.push(Move {
+                            piece: piece.clone(),
+                                            old_position: from,
+                                            new_position: to,
+                                            captured_piece,
+                                            move_type,
+                        });
+                    }
+                }
+            }
+        }
+
+        possible_moves
+    }
+
+}
+
+// TODO
 // начать игру можно только по свершению первого хода (надо различать init и start)
