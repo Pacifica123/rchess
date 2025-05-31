@@ -20,7 +20,15 @@ fn main() {
     g.start();
 
     let mut eng = engine::Engine::new(2, 12);
-    eng.make_move(&mut g);
+    const TOTAL_MOVES: usize = 11000;
+    for take in 1..=TOTAL_MOVES {
+        if g.status.is_gameover.is_some() {
+            break;
+        }
+        eng.make_move(&mut g);
+        println!("\n === Ход №{} | Состояние доски : ", take);
+        g.status.board.display();
+    }
 
     //TODO:  Выбор режима 
     //TODO:  Подключение/Отключение модулей интерактивно

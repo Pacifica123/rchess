@@ -136,7 +136,7 @@ impl Board {
     }
 
     /// возвращает Some чтобы обработать рубку если на to стояла фигура
-    pub fn move_piece(mut self, from: Position, to: Position) -> Option<Piece> {
+    pub fn move_piece(&mut self, from: Position, to: Position) -> Option<Piece> {
         if let Some(mut piece) = self.pieces.remove(&from){
             piece.pos = Some(to); // <- Обновляем позицию фигуры
 
@@ -164,6 +164,52 @@ impl Board {
             }
         }
         res
+    }
+
+    pub fn to_fen(&self, 
+        current_turn: Color, 
+        castling_rights: (bool,bool,bool,bool), 
+        en_passant_target: Option<Position>, 
+        halfmove_clock: usize, 
+        fullmove_number: usize) -> String {
+        let mut rows: Vec<String> = Vec::new();
+        for rank in (1..=8).rev() {
+            let mut empty_count = 0;
+            let mut row_str = String::new();
+            for file in 'a'..='h' {
+                let pos = Position { file, rank };
+                if let Some(piece) = self.get_piece_at(&pos) {
+                    if empty_count > 0 {
+                        row_str.push_str(&empty_count.to_string());
+                        empty_count = 0;
+                    }
+                    let c = match (piece.piece_type, piece.color) {
+                        (PieceType::King, Color::White)   => 'K',
+                        (PieceType::Queen, Color::White)  => 'Q',
+                        (PieceType::Rook, Color::White)   => 'R',
+                        (PieceType::Bishop, Color::White) => 'B',
+                        (PieceType::Knight, Color::White) => 'N',
+                        (PieceType::Pawn, Color::White)   => 'P',
+                        (PieceType::King, Color::Black)   => 'k',
+                        (PieceType::Queen, Color::Black)  => 'q',
+                        (PieceType::Rook, Color::Black)   => 'r',
+                        (PieceType::Bishop, Color::Black) => 'b',
+                        (PieceType::Knight, Color::Black) => 'n',
+                        (PieceType::Pawn, Color::Black)   => 'p',
+                    };
+                    row_str.push(c);
+                } else {
+                    empty_count += 1;
+                }
+            }
+            if empty_count > 0 {
+                row_str.push_str(&empty_count.to_string());
+            }
+            rows.push(row_str);
+        }
+        let placement = rows.join("/");              // пример: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR"
+        let turn_str = if current_turn == Color::White { " w" } else { " b" };
+        format!("{}{}", placement, turn_str)
     }
 }
 
@@ -222,7 +268,17 @@ pub struct CurrentGameStatus {
     pub board: Board,
     pub current_turn: Color, // Цвет игрока, чей ход
     pub is_gameover: Option<GameResult>,
-
+    pub halfmove_clock: usize,
+    /// Сколько полных ходов сыграно (нужно, если вы хотите уметь экспортировать FEN полностью)
+    pub fullmove_number: usize,
+    /// Права на рокировку: (WhiteKingSide, WhiteQueenSide, BlackKingSide, BlackQueenSide)
+    pub castling_rights: (bool, bool, bool, bool),
+    /// Если на предыдущем ходе пешка сделала двойной шаг, здесь хранится поле, 
+    /// которое может быть взято «на проходе»; иначе – None
+    pub en_passant_target: Option<Position>,
+    /// История позиционных ключей (хешей или FEN‐строк) после каждого полухода
+    /// (для обнаружения троекратного повторения)
+    pub history_fens: Vec<String>,
 }
 
 
@@ -247,6 +303,11 @@ impl Game {
             board,
             current_turn,
             is_gameover: None,
+            halfmove_clock: 0,
+            fullmove_number: 1,
+            castling_rights: (true, true, true, true),
+            en_passant_target: None,
+            history_fens: Vec::new(),
         };
         let history = MoveHistory::new(); // Предполагается, что MoveHistory имеет метод new для инициализации пустой истории ходов
 
@@ -269,6 +330,11 @@ impl Game {
             board,
             current_turn,
             is_gameover: None,
+            halfmove_clock: 0,
+            fullmove_number: 1,
+            castling_rights: (true, true, true, true),
+            en_passant_target: None,
+            history_fens: Vec::new(),
         };
         let history = MoveHistory::new();
 
@@ -290,6 +356,7 @@ impl Game {
         // Здесь можно добавить дополнительные действия перед началом игры, если необходимо
         println!("Игра началась!");
     }
+
 
 }
 

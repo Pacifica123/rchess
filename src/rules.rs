@@ -10,6 +10,10 @@ impl Rules{
             if piece.color == p.color {
                 return false; // Нельзя рубить свою фигуру
             }
+            if piece.piece_type == PieceType::King {
+
+                return false;
+            }
         }
         match p.piece_type {
             PieceType::Rook => Rules::can_move_rook(from, to, board),
@@ -153,32 +157,57 @@ pub struct RulesUtils;
 impl RulesUtils {
     /// Кароль под шахом?
     pub fn is_in_check(board: &Board, mycolor: Color) ->bool {
-        let king_pos = board.find_piece(PieceType::King, mycolor).unwrap();
-        let opponent_color = match mycolor {
-            Color::White => Color::Black,
-            Color::Black => Color::White
-        };
-        RulesUtils::is_square_attacked(board, opponent_color, &king_pos)
-        // for piece in board.find_by_color(opponent_color) {
-        //     if Rules::can_move(&piece, king_pos.unwrap(), board) {
-        //         return true;
-        //     }
-        // }
-        // false
+        match board.find_piece(PieceType::King, mycolor) {
+            Some(king_pos) => {
+                let opponent_color = if mycolor == Color::White { Color::Black } else { Color::White };
+                RulesUtils::is_square_attacked(board, opponent_color, &king_pos)
+            }
+            None => {
+                // Технически уже нет короля — либо это ошибка, либо состояние «мат»
+                // Решение: вернуть false, потому что «нет короля» ≈ «игра закончилась»
+                // Или: panic! по смыслу (но лучше вернуть false и обработать мат/пат на уровне Game).
+                false
+            }
+        }
     }
+
+    pub fn is_insufficient_material(board: &Board) -> bool{
+        let white_pieces = board.find_by_color(Color::White);
+        let black_pieces = board.find_by_color(Color::Black);
+        // Если у белых или у чёрных более одной фигуры → материал достаточен
+        if white_pieces.len() != 1 || black_pieces.len() != 1 {
+            return false;
+        }
+        // У каждого ровно одна фигура — проверяем, что это король
+        white_pieces[0].piece_type == PieceType::King && black_pieces[0].piece_type == PieceType::King
+    }
+
     /// Эта рокировка возможна?
-    /// - `king_side` = true если хотите по королевскому флангу (короткая)
-    pub fn can_castle(board: &Board, mycolor: Color, king_side: bool) ->bool{
-        // фундаментальная проверка шаха короля (остальные проверки шаха в вшиты в Move)
-        if RulesUtils::is_in_check(board, mycolor) { return false; }
-        // фундаментальная проверка что ладьи есть и участники рокировки не делали ходы ранее
-        let king_pos = board.find_piece(PieceType::King, mycolor);
-        let king = board.get_piece_at(&king_pos.unwrap());
-        if !king.unwrap().first_move{
-            return false
+    /// - `king_side = true`  → короткая рокировка (‘h’-ладья);
+    /// - `king_side = false` → длинная рокировка (‘a’-ладья).
+    pub fn can_castle(board: &Board, mycolor: Color, king_side: bool) -> bool {
+        // 1) Если король уже под шахом – рокировка невозможна.
+        if RulesUtils::is_in_check(board, mycolor) {
+            return false;
         }
 
-        // Определяем позицию ладьи в зависимости от стороны и цвета
+        // 2) Находим позицию короля и проверяем, что это его первый ход.
+        let king_pos_opt = board.find_piece(PieceType::King, mycolor);
+        let king_pos = match king_pos_opt {
+            Some(p) => p,
+            None => return false, // Короля вообще нет – странная ситуация, но рокировка невозможна.
+        };
+        let king_piece_opt = board.get_piece_at(&king_pos);
+        let king_piece = match king_piece_opt {
+            Some(p) => p,
+            None => return false,
+        };
+        if !king_piece.first_move {
+            return false;
+        }
+
+        // 3) Вычисляем позицию «рокировочной» ладьи: 
+        //    если king_side=true, берём ‘h’, иначе ‘a’. Ранг зависит от цвета.
         let rook_pos = if king_side {
             if mycolor == Color::White {
                 Position { file: 'h', rank: 1 }
@@ -193,66 +222,94 @@ impl RulesUtils {
             }
         };
 
-        // Проверяем, есть ли ладья и сделала ли она первый ход
-        let castle_rook = board.get_piece_at(&rook_pos);
-        match castle_rook {
-            Some(p) => {
-                if !p.first_move { return false }
-                // TODO:
-                /*
-                 * Король не должен проходить через поля, которые находятся под атакой
-                 * Король не должен завершать свой ход на поле, которое находится под атакой
-                 */
-                let opponent_color = match mycolor {
-                    Color::White => Color::Black,
-                    Color::Black => Color::White
-                };
-
-
-                // Определяем направление движения для рокировки
-                let file_direction: i8 = if king_side { 1 } else { -1 };
-
-                // Определяем конечную позицию для проверки (за одну клетку до ладьи)
-                let end_file = if king_side {
-                    (rook_pos.file as u8 - 1) as char
-                } else {
-                    (rook_pos.file as u8 + 1) as char
-                };
-
-                // тут я беспокоюсь за + file_direction...
-                let mut current_file = (king_pos.unwrap().file as u8 + file_direction as u8) as char;
-
-                // Проверяем все поля на пути рокировки
-                while current_file != end_file {
-                    let pos = Position {
-                        file: current_file,
-                        rank: king_pos.unwrap().rank,
-                    };
-
-                    // Проверяем, находится ли поле под атакой противника
-                    if RulesUtils::is_square_attacked(board, opponent_color, &pos) {
-                        return false;
-                    }
-
-                    // Переходим к следующему полю
-                    current_file = (current_file as u8 + file_direction as u8) as char;
-                }
-
-                // Дополнительная проверка конечной позиции короля
-                let final_king_pos = Position {
-                    file: end_file,
-                    rank: king_pos.unwrap().rank,
-                };
-                if RulesUtils::is_square_attacked(board, opponent_color, &final_king_pos) {
-                    return false;
-                }
-
-                true // Если все проверки пройдены, рокировка возможна
-            }
-            None => {false}
+        // 4) Проверяем, что на этой клетке действительно стоит ладья нашего цвета и что она ещё не ходила.
+        let castle_rook_opt = board.get_piece_at(&rook_pos);
+        let castle_rook = match castle_rook_opt {
+            Some(p) => p,
+            None => return false,
+        };
+        if castle_rook.piece_type != PieceType::Rook || castle_rook.color != mycolor {
+            return false;
+        }
+        if !castle_rook.first_move {
+            return false;
         }
 
+        // 5) Определяем цвет противника (нам нужно будет проверять «под шахом» для всех промежуточных клеток).
+        let opponent_color = if mycolor == Color::White {
+            Color::Black
+        } else {
+            Color::White
+        };
 
+        // 6) Перейдём к индексной арифметике для файлов 'a'..='h'.
+        //    В ASCII 'a' = 97, 'b'=98, …, 'h'=104. 
+        //    Зададим idx = (file_char as u8 - b'a') as i8, тогда 'a'→0, 'h'→7.
+        let king_file_idx = (king_pos.file as u8).wrapping_sub(b'a') as i8;
+        let rook_file_idx = (rook_pos.file as u8).wrapping_sub(b'a') as i8;
+        let king_rank = king_pos.rank; // уже u8 (1..=8)
+
+        // 7) Выясняем, в какую сторону «смотреть» при проходе короля:
+        let file_direction: i8 = if king_side { 1 } else { -1 };
+
+        // 8) Определяем конечный индекс для «последнего проверяемого поля» короля:
+        //    если king_side=true, то это rook_file_idx - 1; если false – rook_file_idx + 1.
+        let end_idx = if king_side {
+            rook_file_idx - 1
+        } else {
+            rook_file_idx + 1
+        };
+
+        // **ВАЖНО**: Если король или ладья стоят так, что end_idx выходит за пределы 0..=7, 
+        // значит рокировку в этом направлении делать бессмысленно (ладья не на своём месте).
+        if !(0..=7).contains(&end_idx) {
+            return false;
+        }
+
+        // 9) Теперь проверим промежуточные клетки по пути короля:
+        //    current_idx = king_file_idx + file_direction
+        let mut current_idx = king_file_idx + file_direction;
+
+        // Пока мы ещё не дошли до “ячейки рядом с ладьёй” (end_idx),
+        // проверяем каждую клетку, не атакует ли её противник.
+        // Также убеждаемся, что сам индекс лежит в диапазоне 0..=7, иначе всё ломается.
+        while current_idx != end_idx {
+            if !(0..=7).contains(&current_idx) {
+                // Условие за пределами доски – значит, король стоит не там, где должен, 
+                // или мы как-то «перескочили» через край. Рокировка невозможна.
+                return false;
+            }
+
+            // Собираем текущую позицию:
+            let pos = Position {
+                file: (b'a' + current_idx as u8) as char,
+                rank: king_rank,
+            };
+
+            // Если это поле атакуется противником – рокировка невозможна:
+            if RulesUtils::is_square_attacked(board, opponent_color, &pos) {
+                return false;
+            }
+
+            current_idx += file_direction;
+        }
+
+        // 10) После выхода из цикла current_idx == end_idx. Это последняя позиция короля (перед ладьёй).
+        //     Её тоже нужно проверить на «под шахом».
+        if !(0..=7).contains(&current_idx) {
+            return false;
+        }
+        let final_file = (b'a' + current_idx as u8) as char;
+        let final_king_pos = Position {
+            file: final_file,
+            rank: king_rank,
+        };
+        if RulesUtils::is_square_attacked(board, opponent_color, &final_king_pos) {
+            return false;
+        }
+
+        // 11) Если все проверки пройдены — рокировка возможна.
+        true
     }
 
     /// Вспомогательная функция для проверки, находится ли поле под атакой

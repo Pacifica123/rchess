@@ -1,7 +1,7 @@
 //! engine.rs Анализ, эвристики, дерево поиска и прочее
 //! TODO: Evaluation, Heuristics, SearchDepth, TimeControl, SearchTree, Зеттатаблицы(?)
 
-use crate::game::{Board, Color, Game, Move, GameUtils};
+use crate::{game::{Board, Color, Game, GameResult, GameUtils, Move, Piece, PieceType}, rules::RulesUtils};
 
 use rand::Rng;
 
@@ -119,19 +119,100 @@ impl Engine {
         }
     }
 
-    pub fn make_move(&mut self, game: &mut Game) {
-        // Метод для совершения хода в игре
+pub fn make_move(&mut self, game: &mut Game) {
+    if game.status.is_gameover.is_some() {
+        println!("игра окончена : {:?}", game.status.is_gameover.as_ref());
+
+        return;
+    }
+    let move_opt = {
         let board = &game.status.board;
         let color = game.status.current_turn;
-        let best_move = self.searcher.find_best_move(board, color, game.history.moves.last().copied());
+        let last_move = game.history.moves.last().copied();
+        self.searcher.find_best_move(board, color, last_move)
+    };
 
-        if let Some(move_) = best_move {
-            print!("Ход найден! - ");
-            crate::utils::print_move(&move_);
+    if let Some(mv) = move_opt {
+        print!("Ход найден! - ");
+        crate::utils::print_move(&mv);
+
+        // Применяем саму «физику» перемещения фигуры на доске:
+        //      move_piece возвращает Option<Piece> – снятую (срубленную) при ходе фигуру, 
+        //      но нам это нужно только для внутреннего учёта (mv.captured_piece уже хранит тип сбитой фигуры, 
+        //      если она была).
+        let _maybe_captured: Option<Piece> = game.status.board.move_piece(mv.old_position, mv.new_position);
+        game.history.moves.push(mv);
+        // обновить halfmove_clock
+        if mv.piece.piece_type == PieceType::Pawn || mv.captured_piece.is_some() {
+            game.status.halfmove_clock = 0;
+        } else {
+            game.status.halfmove_clock += 1;
         }
-        // if let Some(move_) = best_move {
-        //     // Применить ход к доске и обновить состояние игры
-        //     unimplemented!()
-        // }
-    }
+        if game.status.current_turn == Color::Black {
+            game.status.fullmove_number += 1;
+        }
+
+        // 50 ходов
+        if game.status.halfmove_clock >= 100 {
+            game.status.is_gameover = Some(GameResult::Draw);
+            return;
+        }
+        // остались только короли
+        if RulesUtils::is_insufficient_material(&game.status.board) {
+            game.status.is_gameover = Some(GameResult::Draw);
+            return;
+        }
+        // смена стороны
+        game.status.current_turn = match game.status.current_turn {
+            Color::White => Color::Black,
+            Color::Black => Color::White,
+        };
+        // Запись FEN 
+        let fen = game.status.board.to_fen(
+            game.status.current_turn,
+            game.status.castling_rights,
+            game.status.en_passant_target,
+            game.status.halfmove_clock,
+            game.status.fullmove_number,
+        );
+        game.status.history_fens.push(fen.clone());
+        // троекратное повторение
+        let reps = game.status.history_fens.iter().filter(|&s| s == &fen).count();
+        if reps >= 3 {
+            game.status.is_gameover = Some(GameResult::Draw);
+            return;
+        }
+        // проверяем, не закончилась ли партия
+        let side_to_move = game.status.current_turn;
+        let in_check = RulesUtils::is_in_check(&game.status.board, side_to_move);
+        let legal_moves = GameUtils::get_possible_moves(
+                &game.status.board,
+                side_to_move,
+                game.history.moves.last().copied(),
+        );
+        if legal_moves.is_empty() {
+            if in_check {
+                // 3.1.1. Король под шахом и ходов нет → это шах‐мат.
+                let result = match side_to_move {
+                    Color::White => GameResult::BlackWin,
+                    Color::Black => GameResult::WhiteWin,
+                };
+                game.status.is_gameover = Some(result);
+            } else {
+                // 3.1.2. Король не под шахом, но ходов нет → пат (ничья).
+                game.status.is_gameover = Some(GameResult::Draw);
+            }
+        }
+        // Если есть легальные ходы — ничего не делаем: партия продолжается.
+    }  
+
+        // Если move_opt == None: значит движок вообще не нашёл ни одного хода на старом цвете,
+        // мы сюда не заходим и, фактически, не меняем ничего в состоянии. В такой ситуации
+        // можно (опционально) выставить is_gameover = Draw или вызвать отдельную логику,
+        // но обычно движок «ни одного хода» возвращает только тогда, когда уже был мат/пат 
+        // на предыдущем ходу и мы сюда просто не должны были попасть.
+}
+
+
+
 }
