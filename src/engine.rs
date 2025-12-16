@@ -143,7 +143,7 @@ pub fn make_move(&mut self, game: &mut Game) {
         let _maybe_captured: Option<Piece> = game.status.board.move_piece(mv.old_position, mv.new_position);
         game.history.moves.push(mv);
         // обновить halfmove_clock
-        if mv.piece.piece_type == PieceType::Pawn || mv.captured_piece.is_some() {
+        if mv.piece.piece_type == PieceType::Pawn || mv.captured_piece_id.is_some() {
             game.status.halfmove_clock = 0;
         } else {
             game.status.halfmove_clock += 1;

@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
+use crate::parser::fen::{self, FenParseError};
 use crate::rules;
 
 //TODO: Game(GameState, MoveHistory, GameMode), Move
@@ -40,6 +41,7 @@ impl Hash for Position {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Piece {
+    pub id: &'static str,
     pub piece_type: PieceType,
     pub color: Color,
     pub pos: Option<Position>,  // None - фигура отсутствует на доске (срублена, фора, другое)
@@ -48,18 +50,112 @@ pub struct Piece {
 
 impl Piece {
     pub fn new(ptype: PieceType, color: Color, pos: Option<Position>) -> Self{
+        let id = Self::generate_id(ptype, color, pos);
         Self{
+            id,
             piece_type: ptype,
             color,
             pos,
             first_move:true,
+            
+        }
+    }
+    fn generate_id(ptype: PieceType, color: Color, pos: Option<Position>) -> &'static str {
+        let color_str = match color {
+            Color::White => "w",
+            Color::Black => "b",
+        };
+
+        let piece_str = match ptype {
+            PieceType::King => "K",
+            PieceType::Queen => "Q",
+            PieceType::Rook => "R",
+            PieceType::Bishop => "B",
+            PieceType::Knight => "N",
+            PieceType::Pawn => "P",
+        };
+
+        match pos {
+            Some(position) => {
+                const FORMAT: &str = "{}{}{}{}";
+                Box::leak(format!("{} {} {} {} {}", FORMAT, color_str, piece_str, position.file, position.rank).into_boxed_str())
+            }
+            None => {
+                const FORMAT: &str = "{} {}";
+                Box::leak(format!("{} {} {}", FORMAT, color_str, piece_str).into_boxed_str())
+            }
+        }
+    }
+    // Для стартовых фигур 
+    pub fn new_start(ptype: PieceType, color: Color, pos: Position) -> Self {
+        let id = match (ptype, color, pos) {
+            // Белые фигуры
+            (PieceType::Rook, Color::White, Position { file: 'a', rank: 1 }) => "wRa1",
+            (PieceType::Rook, Color::White, Position { file: 'h', rank: 1 }) => "wRh1",
+            (PieceType::Knight, Color::White, Position { file: 'b', rank: 1 }) => "wNb1",
+            (PieceType::Knight, Color::White, Position { file: 'g', rank: 1 }) => "wNg1",
+            (PieceType::Bishop, Color::White, Position { file: 'c', rank: 1 }) => "wBc1",
+            (PieceType::Bishop, Color::White, Position { file: 'f', rank: 1 }) => "wBf1",
+            (PieceType::Queen, Color::White, Position { file: 'd', rank: 1 }) => "wQd1",
+            (PieceType::King, Color::White, Position { file: 'e', rank: 1 }) => "wKe1",
+            
+            // Черные фигуры
+            (PieceType::Rook, Color::Black, Position { file: 'a', rank: 8 }) => "bRa8",
+            (PieceType::Rook, Color::Black, Position { file: 'h', rank: 8 }) => "bRh8",
+            (PieceType::Knight, Color::Black, Position { file: 'b', rank: 8 }) => "bNb8",
+            (PieceType::Knight, Color::Black, Position { file: 'g', rank: 8 }) => "bNg8",
+            (PieceType::Bishop, Color::Black, Position { file: 'c', rank: 8 }) => "bBc8",
+            (PieceType::Bishop, Color::Black, Position { file: 'f', rank: 8 }) => "bBf8",
+            (PieceType::Queen, Color::Black, Position { file: 'd', rank: 8 }) => "bQd8",
+            (PieceType::King, Color::Black, Position { file: 'e', rank: 8 }) => "bKe8",
+            
+            // Белые пешки
+            (PieceType::Pawn, Color::White, Position { file: 'a', rank: 2 }) => "wPa2",
+            (PieceType::Pawn, Color::White, Position { file: 'b', rank: 2 }) => "wPb2",
+            (PieceType::Pawn, Color::White, Position { file: 'c', rank: 2 }) => "wPc2",
+            (PieceType::Pawn, Color::White, Position { file: 'd', rank: 2 }) => "wPd2",
+            (PieceType::Pawn, Color::White, Position { file: 'e', rank: 2 }) => "wPe2",
+            (PieceType::Pawn, Color::White, Position { file: 'f', rank: 2 }) => "wPf2",
+            (PieceType::Pawn, Color::White, Position { file: 'g', rank: 2 }) => "wPg2",
+            (PieceType::Pawn, Color::White, Position { file: 'h', rank: 2 }) => "wPh2",
+            
+            // Черные пешки
+            (PieceType::Pawn, Color::Black, Position { file: 'a', rank: 7 }) => "bPa7",
+            (PieceType::Pawn, Color::Black, Position { file: 'b', rank: 7 }) => "bPb7",
+            (PieceType::Pawn, Color::Black, Position { file: 'c', rank: 7 }) => "bPc7",
+            (PieceType::Pawn, Color::Black, Position { file: 'd', rank: 7 }) => "bPd7",
+            (PieceType::Pawn, Color::Black, Position { file: 'e', rank: 7 }) => "bPe7",
+            (PieceType::Pawn, Color::Black, Position { file: 'f', rank: 7 }) => "bPf7",
+            (PieceType::Pawn, Color::Black, Position { file: 'g', rank: 7 }) => "bPg7",
+            (PieceType::Pawn, Color::Black, Position { file: 'h', rank: 7 }) => "bPh7",
+            
+            _ => panic!("Неизвестная стартовая фигура: {:?} {:?} {:?}", ptype, color, pos),
+        };
+        
+        Self {
+            id: id,
+            piece_type: ptype,
+            color,
+            pos: Some(pos),
+            first_move: true,
+        }
+    }
+    
+    /// Превращает эту пешку в новую фигуру
+    pub fn promote(&mut self, new_type: PieceType) {
+        if self.piece_type == PieceType::Pawn {
+            self.piece_type = new_type;
+            self.first_move = false;
+            println!("Пешка  превращена в "); // todo : дебаг принта
+        } else {
+            println!("Только пешки могут превращаться!");
         }
     }
 }
     /*          ---  ДОСКА  ---          */
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Board {
-    pieces: HashMap<Position, Piece>
+    pub(crate) pieces: HashMap<Position, Piece>
 }
 
 impl Board {
@@ -68,35 +164,60 @@ impl Board {
             pieces: HashMap::new()
         }
     }
-    pub fn init_by_default(&mut self){
-        // Инициализация белых фигур
-        self.pieces.insert(Position { file: 'a', rank: 1 }, Piece::new(PieceType::Rook, Color::White, Some(Position { file: 'a', rank: 1 })));
-        self.pieces.insert(Position { file: 'b', rank: 1 }, Piece::new(PieceType::Knight, Color::White, Some(Position { file: 'b', rank: 1 })));
-        self.pieces.insert(Position { file: 'c', rank: 1 }, Piece::new(PieceType::Bishop, Color::White, Some(Position { file: 'c', rank: 1 })));
-        self.pieces.insert(Position { file: 'd', rank: 1 }, Piece::new(PieceType::Queen, Color::White, Some(Position { file: 'd', rank: 1 })));
-        self.pieces.insert(Position { file: 'e', rank: 1 }, Piece::new(PieceType::King, Color::White, Some(Position { file: 'e', rank: 1 })));
-        self.pieces.insert(Position { file: 'f', rank: 1 }, Piece::new(PieceType::Bishop, Color::White, Some(Position { file: 'f', rank: 1 })));
-        self.pieces.insert(Position { file: 'g', rank: 1 }, Piece::new(PieceType::Knight, Color::White, Some(Position { file: 'g', rank: 1 })));
-        self.pieces.insert(Position { file: 'h', rank: 1 }, Piece::new(PieceType::Rook, Color::White, Some(Position { file: 'h', rank: 1 })));
+    pub fn init_by_default(&mut self) {
+        // === БЕЛЫЕ ФИГУРЫ ===
+        self.pieces.insert(Position { file: 'a', rank: 1 }, 
+            Piece::new_start(PieceType::Rook, Color::White, Position { file: 'a', rank: 1 }));
+        self.pieces.insert(Position { file: 'b', rank: 1 }, 
+            Piece::new_start(PieceType::Knight, Color::White, Position { file: 'b', rank: 1 }));
+        self.pieces.insert(Position { file: 'c', rank: 1 }, 
+            Piece::new_start(PieceType::Bishop, Color::White, Position { file: 'c', rank: 1 }));
+        self.pieces.insert(Position { file: 'd', rank: 1 }, 
+            Piece::new_start(PieceType::Queen, Color::White, Position { file: 'd', rank: 1 }));
+        self.pieces.insert(Position { file: 'e', rank: 1 }, 
+            Piece::new_start(PieceType::King, Color::White, Position { file: 'e', rank: 1 }));
+        self.pieces.insert(Position { file: 'f', rank: 1 }, 
+            Piece::new_start(PieceType::Bishop, Color::White, Position { file: 'f', rank: 1 }));
+        self.pieces.insert(Position { file: 'g', rank: 1 }, 
+            Piece::new_start(PieceType::Knight, Color::White, Position { file: 'g', rank: 1 }));
+        self.pieces.insert(Position { file: 'h', rank: 1 }, 
+            Piece::new_start(PieceType::Rook, Color::White, Position { file: 'h', rank: 1 }));
 
+        // Белые пешки (a2-h2)
         for file in b'a'..=b'h' {
-            self.pieces.insert(Position { file: file as char, rank: 2 }, Piece::new(PieceType::Pawn, Color::White, Some(Position { file: file as char, rank: 2 })));
+            let file_char = file as char;
+            self.pieces.insert(
+                Position { file: file_char, rank: 2 },
+                Piece::new_start(PieceType::Pawn, Color::White, Position { file: file_char, rank: 2 })
+            );
         }
 
-        // Инициализация черных фигур
-        self.pieces.insert(Position { file: 'a', rank: 8 }, Piece::new(PieceType::Rook, Color::Black, Some(Position { file: 'a', rank: 8 })));
-        self.pieces.insert(Position { file: 'b', rank: 8 }, Piece::new(PieceType::Knight, Color::Black, Some(Position { file: 'b', rank: 8 })));
-        self.pieces.insert(Position { file: 'c', rank: 8 }, Piece::new(PieceType::Bishop, Color::Black, Some(Position { file: 'c', rank: 8 })));
-        self.pieces.insert(Position { file: 'd', rank: 8 }, Piece::new(PieceType::Queen, Color::Black, Some(Position { file: 'd', rank: 8 })));
-        self.pieces.insert(Position { file: 'e', rank: 8 }, Piece::new(PieceType::King, Color::Black, Some(Position { file: 'e', rank: 8 })));
-        self.pieces.insert(Position { file: 'f', rank: 8 }, Piece::new(PieceType::Bishop, Color::Black, Some(Position { file: 'f', rank: 8 })));
-        self.pieces.insert(Position { file: 'g', rank: 8 }, Piece::new(PieceType::Knight, Color::Black, Some(Position { file: 'g', rank: 8 })));
-        self.pieces.insert(Position { file: 'h', rank: 8 }, Piece::new(PieceType::Rook, Color::Black, Some(Position { file: 'h', rank: 8 })));
+        // === ЧЕРНЫЕ ФИГУРЫ ===
+        self.pieces.insert(Position { file: 'a', rank: 8 }, 
+            Piece::new_start(PieceType::Rook, Color::Black, Position { file: 'a', rank: 8 }));
+        self.pieces.insert(Position { file: 'b', rank: 8 }, 
+            Piece::new_start(PieceType::Knight, Color::Black, Position { file: 'b', rank: 8 }));
+        self.pieces.insert(Position { file: 'c', rank: 8 }, 
+            Piece::new_start(PieceType::Bishop, Color::Black, Position { file: 'c', rank: 8 }));
+        self.pieces.insert(Position { file: 'd', rank: 8 }, 
+            Piece::new_start(PieceType::Queen, Color::Black, Position { file: 'd', rank: 8 }));
+        self.pieces.insert(Position { file: 'e', rank: 8 }, 
+            Piece::new_start(PieceType::King, Color::Black, Position { file: 'e', rank: 8 }));
+        self.pieces.insert(Position { file: 'f', rank: 8 }, 
+            Piece::new_start(PieceType::Bishop, Color::Black, Position { file: 'f', rank: 8 }));
+        self.pieces.insert(Position { file: 'g', rank: 8 }, 
+            Piece::new_start(PieceType::Knight, Color::Black, Position { file: 'g', rank: 8 }));
+        self.pieces.insert(Position { file: 'h', rank: 8 }, 
+            Piece::new_start(PieceType::Rook, Color::Black, Position { file: 'h', rank: 8 }));
 
+        // Черные пешки (a7-h7)
         for file in b'a'..=b'h' {
-            self.pieces.insert(Position { file: file as char, rank: 7 }, Piece::new(PieceType::Pawn, Color::Black, Some(Position { file: file as char, rank: 7 })));
+            let file_char = file as char;
+            self.pieces.insert(
+                Position { file: file_char, rank: 7 },
+                Piece::new_start(PieceType::Pawn, Color::Black, Position { file: file_char, rank: 7 })
+            );
         }
-
     }
     /// Вывод доски в консоль
     pub fn display(&self) {
@@ -211,6 +332,20 @@ impl Board {
         let turn_str = if current_turn == Color::White { " w" } else { " b" };
         format!("{}{}", placement, turn_str)
     }
+    
+    pub fn to_full_fen(&self, current_turn: Color, castling: (bool,bool,bool,bool), en_passant: Option<Position>, halfmove: usize, fullmove: usize) -> String {
+        let placement = self.to_fen(current_turn, castling, en_passant, halfmove, fullmove);
+        let turn_str = if current_turn == Color::White { " w " } else { " b " };
+        let castling_str = format!("{}{}{}{}", 
+                                            if castling.0 { "K" } else { "" },
+                                            if castling.1 { "Q" } else { "" },
+                                            if castling.2 { "k" } else { "" },
+                                            if castling.3 { "q" } else { "" });
+        let ep_str = en_passant.map_or_else(|| "-".to_string(), |p| format!("{}{}", p.file, p.rank));
+        format!("{}{} {} {} {} {}", 
+                placement.split_whitespace().next().unwrap(), turn_str, 
+                if castling_str.is_empty() { "-" } else { &castling_str }, ep_str, halfmove, fullmove)
+    }
 }
 
     /*          ---  ХОДЫ  ---          */
@@ -232,7 +367,7 @@ pub struct Move {
     pub piece: Piece,
     pub old_position: Position,
     pub new_position: Position,
-    pub captured_piece: Option<PieceType>,
+    pub captured_piece_id: Option<&'static str>,
     pub move_type: MoveType,
 }
 
@@ -357,7 +492,123 @@ impl Game {
         println!("Игра началась!");
     }
 
+    /// перемещает фигуру, снимает захваченные фигуры, обновляет счетчики (halfmove/fullmove), устанавливает флаг en-passant и сохраняет минимальную информацию в структуру истории
+    pub fn apply_move(&mut self, mv: Move){
+        // 1. Проверка что ход возможный
+        let all_possible_mvs = GameUtils::get_possible_moves(
+            &self.status.board, 
+            self.status.current_turn,
+            self.history.moves.last().copied()
 
+        );
+        if !all_possible_mvs.contains(&mv) {
+            println!("Недопустимый ход: не найден в возможных ходах."); // todo : для дебага печатать ход
+            return; // просто не применяем
+        }
+        // если все же есть то применяем
+        // 2. Применение хода на доску
+        let captured_piece = self.status.board.move_piece(mv.old_position, mv.new_position);
+        // если взятая фигура в ходе не совпадает со взятой фигурой на доске то что-то явно не так:
+        if mv.captured_piece_id.is_some() && captured_piece.is_some() {
+            if mv.captured_piece_id != Some(captured_piece.unwrap().id) {
+                println!("Произошла какая-то хрень..");
+                // Откат: восстанавливаем фигуру обратно
+                // if let Some(piece) = self.status.board.get_piece_at(actual_id) {
+                //     self.status.board.place_piece(mv.new_position, piece);
+                //     self.status.board.place_piece(mv.old_position, None);
+                // }
+                return;
+            } else {//if expected_id != 0 {
+                // println!("Ожидался захват фигуры {}, но фигура не взята.", expected_id);
+                println!("Ожидался захват фигуры, но фигура не взята.");
+                // Откат...
+                return;
+            }
+        }
+        // Специальная обработка en passant
+        self.status.en_passant_target = None; // сбрасываем по умолчанию
+        if mv.move_type == MoveType::EnPassant {
+            // Удаляем пешку противника за целью en passant
+            let opponent_pawn_pos = if self.status.current_turn == Color::White {
+                Position { file: mv.new_position.file, rank: mv.new_position.rank - 1 }
+            } else {
+                Position { file: mv.new_position.file, rank: mv.new_position.rank + 1 }
+            };
+            self.status.board.pieces.remove(&opponent_pawn_pos);
+        } else if mv.piece.piece_type == PieceType::Pawn && 
+                  ((mv.old_position.rank == 2 && mv.new_position.rank == 4 && mv.piece.color == Color::White) ||
+                   (mv.old_position.rank == 7 && mv.new_position.rank == 5 && mv.piece.color == Color::Black)) {
+            // Двойной шаг пешки -> создаем цель для en passant
+            self.status.en_passant_target = Some(Position {
+                file: mv.new_position.file,
+                rank: if mv.piece.color == Color::White { 3 } else { 6 }
+            });
+        }
+        // Специальная обработка рокировки
+        if mv.move_type == MoveType::Castling {
+            let (rook_from, rook_to) = if mv.new_position.file == 'g' {
+                // Королевская рокировка
+                if self.status.current_turn == Color::White {
+                    (Position { file: 'h', rank: 1 }, Position { file: 'f', rank: 1 })
+                } else {
+                    (Position { file: 'h', rank: 8 }, Position { file: 'f', rank: 8 })
+                }
+            } else {
+                // Ферзовая рокировка
+                if self.status.current_turn == Color::White {
+                    (Position { file: 'a', rank: 1 }, Position { file: 'd', rank: 1 })
+                } else {
+                    (Position { file: 'a', rank: 8 }, Position { file: 'd', rank: 8 })
+                }
+            };
+            self.status.board.move_piece(rook_from, rook_to);
+        }
+        // Обновляем права на рокировку
+        let (wk, wq, bk, bq) = self.status.castling_rights;
+        let new_castling_rights = match mv.piece.piece_type {
+            PieceType::King if mv.piece.color == Color::White => (false, false, bk, bq),
+            PieceType::Rook if mv.old_position.file == 'h' && mv.piece.color == Color::White => (false, wq, bk, bq),
+            PieceType::Rook if mv.old_position.file == 'a' && mv.piece.color == Color::White => (wk, false, bk, bq),
+            PieceType::King if mv.piece.color == Color::Black => (wk, wq, false, false),
+            PieceType::Rook if mv.old_position.file == 'h' && mv.piece.color == Color::Black => (wk, wq, false, bq),
+            PieceType::Rook if mv.old_position.file == 'a' && mv.piece.color == Color::Black => (wk, wq, bk, false),
+            _ => (wk, wq, bk, bq),
+        };
+        self.status.castling_rights = new_castling_rights;
+        // Обновляем first_move для перемещенной фигуры
+        if let Some(piece) = self.status.board.pieces.get_mut(&mv.new_position) {
+            piece.first_move = false;
+        }
+        
+        // Обновить цвет
+        self.status.current_turn = match self.status.current_turn {
+            Color::White => Color::Black,
+            Color::Black => Color::White,
+        };
+        // 3. Запись в историю ходов
+        //      Обновляем счетчики FEN
+        if mv.move_type == MoveType::Capture || mv.move_type == MoveType::EnPassant || 
+           mv.piece.piece_type == PieceType::Pawn {
+            self.status.halfmove_clock = 0;
+        } else {
+            self.status.halfmove_clock += 1;
+        }
+
+        if self.status.current_turn == Color::Black {
+            self.status.fullmove_number += 1;
+        }
+        self.history.moves.push(mv)
+    }
+
+    pub fn from_fen(fen: &str, gamemode: Gamemode) -> Result<Self, FenParseError> {
+        let status = fen::parse_fen(fen)?;
+        Ok(Self {
+            status,
+            history: MoveHistory::new(),
+            gamemode,
+            color_engine: None,
+        })
+    }
 }
 
 
@@ -384,14 +635,14 @@ impl GameUtils {
 
                     if rules::Rules::can_move(&piece, to, board) {
                         let captured_piece = if let Some(captured) = board.get_piece_at(&to) {
-                            Some(captured.piece_type)
+                            Some(captured)
                         } else {
                             None
                         };
 
                         let mut move_type = match captured_piece {
-                            Some(_) => MoveType::Capture,
-                            None => MoveType::Normal,
+                            Some(captured) => MoveType::Capture,  // Есть захваченная фигура
+                            None => MoveType::Normal,             // Нет захвата
                         };
 
                         // Дополнительно проверить на рокировку
@@ -419,7 +670,7 @@ impl GameUtils {
                             piece: piece.clone(),
                                             old_position: from,
                                             new_position: to,
-                                            captured_piece,
+                                            captured_piece_id: captured_piece.map(|captured| captured.id),
                                             move_type,
                         });
                     }
