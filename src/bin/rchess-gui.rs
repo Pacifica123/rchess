@@ -9,10 +9,11 @@ use std::thread;
 use std::time::Duration;
 
 use eframe::egui;
-use rchess::analysis::{format_accuracy, format_cp, AnalysisJob, GameAnalysis};
+use rchess::analysis::{format_accuracy, format_cp, format_cp_value, AnalysisJob, GameAnalysis};
 use rchess::chess::{square_name, ChessMove, Color, PieceKind, Position, STARTPOS_FEN};
 use rchess::matchplay::{EngineMatchController, SearchLimit, UciEngineSlot};
 use rchess::pgn::{export_pgn, move_to_san, parse_pgn, position_after_moves};
+use rchess::search::evaluate_for_side_to_move;
 
 fn main() -> eframe::Result<()> {
     if env::args().any(|arg| arg == "--engine-mode") {
@@ -62,6 +63,7 @@ struct RChessGui {
     promotion_request: Option<PromotionRequest>,
     played_moves: Vec<ChessMove>,
     redo_moves: Vec<ChessMove>,
+    history_view_ply: Option<usize>,
     player_color: Color,
     auto_engine: bool,
     flipped: bool,
@@ -77,6 +79,10 @@ struct RChessGui {
     engine_rx: Option<Receiver<String>>,
     engine_log: Vec<String>,
     last_engine_info: String,
+    last_engine_score_cp: Option<i32>,
+    planned_threads: u16,
+    planned_hash_mb: u32,
+    resource_settings_status: String,
     match_white_path: String,
     match_black_path: String,
     match_depth: u8,
@@ -133,6 +139,7 @@ impl RChessGui {
             promotion_request: None,
             played_moves: Vec::new(),
             redo_moves: Vec::new(),
+            history_view_ply: None,
             player_color: Color::White,
             auto_engine: true,
             flipped: false,
@@ -148,6 +155,10 @@ impl RChessGui {
             engine_rx: None,
             engine_log: Vec::new(),
             last_engine_info: String::new(),
+            last_engine_score_cp: None,
+            planned_threads: 1,
+            planned_hash_mb: 64,
+            resource_settings_status: "Resource controls are placeholders; current search remains single-threaded".to_string(),
             match_white_path: String::new(),
             match_black_path: String::new(),
             match_depth: 3,
@@ -191,8 +202,10 @@ impl RChessGui {
         self.promotion_request = None;
         self.played_moves.clear();
         self.redo_moves.clear();
+        self.history_view_ply = None;
         self.pgn_text.clear();
         self.pending_engine = false;
+        self.last_engine_score_cp = None;
         self.engine_status = "New game".to_string();
         self.send_to_engine("ucinewgame");
         self.refresh_game_status();
@@ -217,7 +230,9 @@ impl RChessGui {
                 self.promotion_request = None;
                 self.played_moves.clear();
                 self.redo_moves.clear();
+                self.history_view_ply = None;
                 self.pending_engine = false;
+                self.last_engine_score_cp = None;
                 self.engine_status = "FEN loaded".to_string();
                 self.refresh_game_status();
             }
@@ -289,6 +304,7 @@ impl RChessGui {
                 self.game_start_fen = game.start_fen;
                 self.played_moves = game.moves;
                 self.redo_moves.clear();
+                self.history_view_ply = None;
                 self.position = position;
                 self.fen_input = self.position.to_fen();
                 self.selected = None;
@@ -297,6 +313,7 @@ impl RChessGui {
                 self.drag_pointer = None;
                 self.promotion_request = None;
                 self.pending_engine = false;
+                self.last_engine_score_cp = None;
                 self.engine_status = format!("PGN loaded, result {}", game.result);
                 self.refresh_game_status();
 
@@ -324,7 +341,7 @@ impl RChessGui {
     }
 
     fn select_square(&mut self, square: u8) {
-        if self.pending_engine || self.match_running || self.promotion_request.is_some() {
+        if self.pending_engine || self.match_running || self.promotion_request.is_some() || !self.is_history_view_live() {
             return;
         }
 
@@ -347,7 +364,7 @@ impl RChessGui {
     }
 
     fn select_piece(&mut self, square: u8) -> bool {
-        if self.pending_engine || self.match_running || self.promotion_request.is_some() {
+        if self.pending_engine || self.match_running || self.promotion_request.is_some() || !self.is_history_view_live() {
             return false;
         }
         let Some(piece) = self.position.piece_at(square) else {
@@ -384,6 +401,10 @@ impl RChessGui {
     }
 
     fn try_apply_selected_to(&mut self, to: u8) -> bool {
+        if !self.is_history_view_live() {
+            self.engine_status = "Return to live position before making a move".to_string();
+            return false;
+        }
         let Some(from) = self.selected else {
             return false;
         };
@@ -437,6 +458,8 @@ impl RChessGui {
     fn record_applied_move(&mut self, chess_move: ChessMove) {
         self.played_moves.push(chess_move);
         self.redo_moves.clear();
+        self.history_view_ply = None;
+        self.last_engine_score_cp = None;
         self.fen_input = self.position.to_fen();
     }
 
@@ -447,6 +470,7 @@ impl RChessGui {
         }
         self.position = position;
         self.fen_input = self.position.to_fen();
+        self.history_view_ply = None;
         self.clear_selection();
         self.promotion_request = None;
         self.refresh_game_status();
@@ -481,6 +505,8 @@ impl RChessGui {
         match self.position.make_legal_move(chess_move) {
             Ok(()) => {
                 self.played_moves.push(chess_move);
+                self.history_view_ply = None;
+                self.last_engine_score_cp = None;
                 self.fen_input = self.position.to_fen();
                 self.clear_selection();
                 self.promotion_request = None;
@@ -498,6 +524,7 @@ impl RChessGui {
         self.engine = None;
         self.engine_rx = None;
         self.pending_engine = false;
+        self.last_engine_score_cp = None;
         self.engine_status = status.into();
     }
 
@@ -619,6 +646,9 @@ impl RChessGui {
         }
         if line.starts_with("info ") {
             self.last_engine_info = compact_uci_info_line(&line);
+            if let Some(score_cp) = parse_uci_score_cp(&line) {
+                self.last_engine_score_cp = Some(score_cp);
+            }
             return;
         }
 
@@ -711,6 +741,7 @@ impl RChessGui {
         self.game_start_fen = start_fen;
         self.played_moves.clear();
         self.redo_moves.clear();
+        self.history_view_ply = None;
         self.match_controller = Some(controller);
         self.match_white_engine = Some(white_engine);
         self.match_black_engine = Some(black_engine);
@@ -883,6 +914,7 @@ impl RChessGui {
                 self.position = position;
                 self.played_moves = moves;
                 self.redo_moves.clear();
+                self.history_view_ply = None;
                 self.fen_input = self.position.to_fen();
                 self.refresh_game_status();
                 self.update_match_pgn_text();
@@ -939,6 +971,21 @@ impl RChessGui {
                 return;
             }
         };
+        match position_after_moves(&start_fen, &moves) {
+            Ok(position) => {
+                self.game_start_fen = start_fen.clone();
+                self.played_moves = moves.clone();
+                self.redo_moves.clear();
+                self.position = position;
+                self.fen_input = self.position.to_fen();
+                self.history_view_ply = None;
+                self.refresh_game_status();
+            }
+            Err(error) => {
+                self.analysis_status = format!("Analysis position error: {error}");
+                return;
+            }
+        }
         let jobs: VecDeque<AnalysisJob> = analysis.jobs().into_iter().collect();
         if jobs.is_empty() {
             self.analysis_status = "No analysis jobs".to_string();
@@ -1091,6 +1138,112 @@ impl RChessGui {
         };
     }
 
+    fn history_view_ply(&self) -> usize {
+        self.history_view_ply.unwrap_or(self.played_moves.len()).min(self.played_moves.len())
+    }
+
+    fn is_history_view_live(&self) -> bool {
+        self.history_view_ply().min(self.played_moves.len()) == self.played_moves.len()
+    }
+
+    fn history_view_label(&self) -> String {
+        let ply = self.history_view_ply();
+        let total = self.played_moves.len();
+        if ply == total {
+            format!("Live position, ply {ply}/{total}")
+        } else {
+            format!("History view, ply {ply}/{total}")
+        }
+    }
+
+    fn position_at_ply(&self, ply: usize) -> Result<Position, String> {
+        let mut position = Position::from_fen(&self.game_start_fen)?;
+        for chess_move in self.played_moves.iter().take(ply.min(self.played_moves.len())) {
+            position.make_legal_move(*chess_move)?;
+        }
+        Ok(position)
+    }
+
+    fn display_position(&self) -> Position {
+        self.position_at_ply(self.history_view_ply()).unwrap_or_else(|_| self.position.clone())
+    }
+
+    fn navigate_history_to(&mut self, ply: usize) {
+        let total = self.played_moves.len();
+        let clamped = ply.min(total);
+        self.history_view_ply = if clamped == total { None } else { Some(clamped) };
+        self.clear_selection();
+        self.promotion_request = None;
+        self.engine_status = self.history_view_label();
+    }
+
+    fn history_to_start(&mut self) {
+        self.navigate_history_to(0);
+    }
+
+    fn history_previous(&mut self) {
+        let current = self.history_view_ply();
+        self.navigate_history_to(current.saturating_sub(1));
+    }
+
+    fn history_next(&mut self) {
+        let current = self.history_view_ply();
+        self.navigate_history_to(current.saturating_add(1));
+    }
+
+    fn history_to_live(&mut self) {
+        self.navigate_history_to(self.played_moves.len());
+    }
+
+    fn handle_history_keyboard(&mut self, ctx: &egui::Context) {
+        if ctx.wants_keyboard_input() {
+            return;
+        }
+        let previous = ctx.input(|input| input.key_pressed(egui::Key::ArrowLeft));
+        let next = ctx.input(|input| input.key_pressed(egui::Key::ArrowRight));
+        let home = ctx.input(|input| input.key_pressed(egui::Key::Home));
+        let end = ctx.input(|input| input.key_pressed(egui::Key::End));
+        if previous {
+            self.history_previous();
+        }
+        if next {
+            self.history_next();
+        }
+        if home {
+            self.history_to_start();
+        }
+        if end {
+            self.history_to_live();
+        }
+    }
+
+    fn analysis_score_for_ply_white(&self, ply: usize) -> Option<i32> {
+        let analysis = self.analysis.as_ref()?;
+        if ply == 0 {
+            let item = analysis.items.first()?;
+            return item
+                .before_score_cp
+                .map(|score| score_from_fen_side_to_move_to_white(&item.before_fen, score));
+        }
+        let item = analysis.items.get(ply.saturating_sub(1))?;
+        item.after_score_cp
+            .map(|score| score_from_fen_side_to_move_to_white(&item.after_fen, score))
+    }
+
+    fn display_eval_cp_white(&self, display_position: &Position) -> i32 {
+        let ply = self.history_view_ply();
+        if let Some(score) = self.analysis_score_for_ply_white(ply) {
+            return score;
+        }
+        if self.is_history_view_live() {
+            if let Some(score) = self.last_engine_score_cp {
+                return score_from_side_to_move_to_white(display_position.side_to_move(), score);
+            }
+        }
+        score_from_side_to_move_to_white(display_position.side_to_move(), evaluate_for_side_to_move(display_position))
+    }
+
+
     fn san_move_rows(&self) -> Vec<String> {
         let mut position = match Position::from_fen(&self.game_start_fen) {
             Ok(position) => position,
@@ -1148,14 +1301,50 @@ impl RChessGui {
 
 
     fn legal_move_rows(&self) -> Vec<String> {
+        let position = self.display_position();
         let mut rows = Vec::new();
-        let mut moves = self.position.legal_moves();
+        let mut moves = position.legal_moves();
         moves.sort_by_key(|chess_move| chess_move.to_uci());
         for chess_move in moves {
-            let san = move_to_san(&self.position, chess_move).unwrap_or_else(|_| chess_move.to_uci());
+            let san = move_to_san(&position, chess_move).unwrap_or_else(|_| chess_move.to_uci());
             rows.push(format!("{:<8} {}", san, chess_move.to_uci()));
         }
         rows
+    }
+
+    fn show_history_navigation(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Game navigation");
+        ui.label(self.history_view_label());
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(self.history_view_ply() > 0, egui::Button::new("|<"))
+                .clicked()
+            {
+                self.history_to_start();
+            }
+            if ui
+                .add_enabled(self.history_view_ply() > 0, egui::Button::new("<"))
+                .clicked()
+            {
+                self.history_previous();
+            }
+            if ui
+                .add_enabled(self.history_view_ply() < self.played_moves.len(), egui::Button::new(">"))
+                .clicked()
+            {
+                self.history_next();
+            }
+            if ui
+                .add_enabled(self.history_view_ply() < self.played_moves.len(), egui::Button::new(">|"))
+                .clicked()
+            {
+                self.history_to_live();
+            }
+        });
+        ui.label("Keyboard: Left/Right, Home/End when no text field is focused.");
+        if !self.is_history_view_live() {
+            ui.label("Board is read-only while browsing history.");
+        }
     }
 
     fn show_promotion_dialog(&mut self, ctx: &egui::Context) {
@@ -1257,7 +1446,7 @@ impl RChessGui {
                         self.stop_engine("UCI child stopped");
                     }
                     ui.separator();
-                    ui.label("Backend is configured in the right panel.");
+                    ui.label("Backend and planned CPU/RAM placeholders are configured in the right panel.");
                 });
 
                 ui.menu_button("Match", |ui| {
@@ -1318,6 +1507,8 @@ impl RChessGui {
             .show_inside(ui, |ui| {
                 ui.heading("Board controls");
                 ui.label(&self.game_status);
+                ui.separator();
+                self.show_history_navigation(ui);
                 ui.separator();
 
                 ui.horizontal_wrapped(|ui| {
@@ -1484,6 +1675,8 @@ impl RChessGui {
                         }
                     }
 
+                    self.show_engine_resource_settings(ui);
+
                     ui.horizontal_wrapped(|ui| {
                         if ui.button("Restart UCI child").clicked() {
                             self.stop_engine("Restarting UCI child");
@@ -1546,6 +1739,24 @@ impl RChessGui {
     }
 
 
+    fn show_engine_resource_settings(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        ui.heading("Resource settings, planned");
+        ui.label("These controls are intentionally GUI-only for now. The current rchess search stays single-threaded and does not allocate a hash table yet.");
+        ui.add(egui::Slider::new(&mut self.planned_threads, 1..=32).text("CPU threads target"));
+        ui.horizontal(|ui| {
+            ui.label("Hash target MB");
+            ui.add(egui::DragValue::new(&mut self.planned_hash_mb).range(16..=4096).speed(16.0));
+        });
+        if ui.button("Store planned resource profile").clicked() {
+            self.resource_settings_status = format!(
+                "Stored future profile only: {} thread(s), {} MB hash target. Not applied to search yet.",
+                self.planned_threads, self.planned_hash_mb
+            );
+        }
+        ui.label(&self.resource_settings_status);
+    }
+
     fn show_analysis_panel(&mut self, ui: &mut egui::Ui) {
         ui.label(&self.analysis_status);
         ui.add(egui::Slider::new(&mut self.analysis_depth, 1..=8).text("Analysis depth"));
@@ -1577,6 +1788,8 @@ impl RChessGui {
             ui.label(format!("Black accuracy: {}", format_accuracy(summary.black_accuracy)));
             ui.label(summary.verdict);
             ui.separator();
+            let current_view_ply = self.history_view_ply();
+            let mut requested_ply = None;
             egui::ScrollArea::vertical()
                 .id_salt("analysis_rows_scroll")
                 .max_height(220.0)
@@ -1588,12 +1801,21 @@ impl RChessGui {
                         let after = format_cp(item.after_score_cp.map(|value| -value));
                         let loss = item.loss_cp.map(|value| value.to_string()).unwrap_or_else(|| "-".to_string());
                         let accuracy = format_accuracy(item.accuracy);
-                        ui.monospace(format!(
+                        let row = format!(
                             "{:<3} {:<5} {:<8} {:<10} {:<10} {:<5} {}",
                             item.ply, side, item.san, before, after, loss, accuracy
-                        ));
+                        );
+                        if ui
+                            .selectable_label(current_view_ply == item.ply, egui::RichText::new(row).monospace())
+                            .clicked()
+                        {
+                            requested_ply = Some(item.ply);
+                        }
                     }
                 });
+            if let Some(ply) = requested_ply {
+                self.navigate_history_to(ply);
+            }
         } else {
             ui.label("Paste/load a PGN or play a game, then start analysis.");
         }
@@ -1669,64 +1891,106 @@ impl RChessGui {
             ui.vertical_centered(|ui| {
                 ui.add_space(10.0);
 
-                let max_size = ui.available_width().min(ui.available_height() - 28.0);
+                let display_position = self.display_position();
+                let eval_cp = self.display_eval_cp_white(&display_position);
+                let max_size = (ui.available_width() - 46.0).min(ui.available_height() - 54.0);
                 let board_size = max_size.clamp(320.0, 640.0);
-                let (rect, response) = ui.allocate_exact_size(
-                    egui::vec2(board_size, board_size),
-                    egui::Sense::click_and_drag(),
-                );
 
-                if response.drag_started() {
-                    if let Some(pointer_pos) = response.interact_pointer_pos() {
-                        if let Some(square) = pointer_to_square(rect, pointer_pos, self.flipped) {
-                            if self.select_piece(square) {
-                                self.dragging_from = Some(square);
-                                self.drag_pointer = Some(pointer_pos);
-                            }
-                        }
-                    }
-                }
+                ui.horizontal_centered(|ui| {
+                    self.paint_evaluation_bar(ui, board_size, eval_cp);
 
-                if self.dragging_from.is_some() {
-                    if let Some(pointer_pos) = response.interact_pointer_pos() {
-                        self.drag_pointer = Some(pointer_pos);
-                    }
-                }
+                    let (rect, response) = ui.allocate_exact_size(
+                        egui::vec2(board_size, board_size),
+                        egui::Sense::click_and_drag(),
+                    );
 
-                self.paint_board(ui, rect);
-
-                if response.drag_stopped() {
-                    if self.dragging_from.is_some() {
-                        if let Some(pointer_pos) = self.drag_pointer.or_else(|| response.interact_pointer_pos()) {
+                    if self.is_history_view_live() && response.drag_started() {
+                        if let Some(pointer_pos) = response.interact_pointer_pos() {
                             if let Some(square) = pointer_to_square(rect, pointer_pos, self.flipped) {
-                                self.try_apply_selected_to(square);
-                            } else {
-                                self.clear_selection();
+                                if self.select_piece(square) {
+                                    self.dragging_from = Some(square);
+                                    self.drag_pointer = Some(pointer_pos);
+                                }
                             }
                         }
                     }
-                    self.dragging_from = None;
-                    self.drag_pointer = None;
-                } else if response.clicked() {
-                    if let Some(pointer_pos) = response.interact_pointer_pos() {
-                        if let Some(square) = pointer_to_square(rect, pointer_pos, self.flipped) {
-                            self.select_square(square);
+
+                    if self.dragging_from.is_some() {
+                        if let Some(pointer_pos) = response.interact_pointer_pos() {
+                            self.drag_pointer = Some(pointer_pos);
                         }
                     }
-                }
+
+                    self.paint_board(ui, rect, &display_position);
+
+                    if response.drag_stopped() {
+                        if self.dragging_from.is_some() {
+                            if let Some(pointer_pos) = self.drag_pointer.or_else(|| response.interact_pointer_pos()) {
+                                if let Some(square) = pointer_to_square(rect, pointer_pos, self.flipped) {
+                                    self.try_apply_selected_to(square);
+                                } else {
+                                    self.clear_selection();
+                                }
+                            }
+                        }
+                        self.dragging_from = None;
+                        self.drag_pointer = None;
+                    } else if self.is_history_view_live() && response.clicked() {
+                        if let Some(pointer_pos) = response.interact_pointer_pos() {
+                            if let Some(square) = pointer_to_square(rect, pointer_pos, self.flipped) {
+                                self.select_square(square);
+                            }
+                        }
+                    }
+                });
 
                 ui.add_space(8.0);
-                ui.monospace(self.position.to_fen());
+                ui.horizontal_wrapped(|ui| {
+                    ui.monospace(format!("{} | eval {}", self.history_view_label(), format_cp_value(eval_cp)));
+                    if !self.is_history_view_live() && ui.button("Return live").clicked() {
+                        self.history_to_live();
+                    }
+                });
+                ui.monospace(display_position.to_fen());
             });
         });
     }
 
-    fn paint_board(&self, ui: &mut egui::Ui, rect: egui::Rect) {
+    fn paint_evaluation_bar(&self, ui: &mut egui::Ui, board_size: f32, score_cp: i32) {
+        ui.vertical_centered(|ui| {
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(30.0, board_size), egui::Sense::hover());
+            let painter = ui.painter_at(rect);
+            painter.rect_filled(rect, 3.0, egui::Color32::from_rgb(20, 20, 20));
+
+            let clamped = score_cp.clamp(-1000, 1000) as f32;
+            let white_ratio = (0.5 + clamped / 2000.0).clamp(0.03, 0.97);
+            let white_height = rect.height() * white_ratio;
+            let white_rect = egui::Rect::from_min_max(
+                egui::pos2(rect.left(), rect.bottom() - white_height),
+                rect.right_bottom(),
+            );
+            painter.rect_filled(white_rect, 3.0, egui::Color32::from_rgb(235, 235, 225));
+            painter.rect_stroke(
+                rect,
+                3.0,
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(90, 90, 90)),
+                egui::StrokeKind::Outside,
+            );
+            ui.add_space(4.0);
+            ui.monospace(format_cp_value(score_cp));
+        });
+    }
+
+    fn paint_board(&self, ui: &mut egui::Ui, rect: egui::Rect, display_position: &Position) {
         let painter = ui.painter_at(rect);
         let square_size = rect.width() / 8.0;
-        let selected = self.selected;
-        let legal_targets: Vec<u8> = self.selected_moves.iter().map(|chess_move| chess_move.to).collect();
-        let check_square = self.checked_king_square();
+        let selected = if self.is_history_view_live() { self.selected } else { None };
+        let legal_targets: Vec<u8> = if self.is_history_view_live() {
+            self.selected_moves.iter().map(|chess_move| chess_move.to).collect()
+        } else {
+            Vec::new()
+        };
+        let check_square = self.checked_king_square(display_position);
         let drag_target = self
             .drag_pointer
             .and_then(|pointer| pointer_to_square(rect, pointer, self.flipped));
@@ -1759,7 +2023,7 @@ impl RChessGui {
 
                 if legal_targets.contains(&square) {
                     let center = square_rect.center();
-                    if self.position.piece_at(square).is_some() {
+                    if display_position.piece_at(square).is_some() {
                         painter.circle_stroke(
                             center,
                             square_size * 0.36,
@@ -1775,7 +2039,7 @@ impl RChessGui {
                 }
 
                 if self.dragging_from != Some(square) {
-                    if let Some(piece) = self.position.piece_at(square) {
+                    if let Some(piece) = display_position.piece_at(square) {
                         self.paint_piece(&painter, piece, square_rect.center(), square_size);
                     }
                 }
@@ -1792,7 +2056,7 @@ impl RChessGui {
         );
 
         if let (Some(from), Some(pointer)) = (self.dragging_from, self.drag_pointer) {
-            if let Some(piece) = self.position.piece_at(from) {
+            if let Some(piece) = display_position.piece_at(from) {
                 painter.circle_filled(
                     pointer,
                     square_size * 0.42,
@@ -1887,14 +2151,14 @@ impl RChessGui {
         }
     }
 
-    fn checked_king_square(&self) -> Option<u8> {
-        let color = self.position.side_to_move();
-        if !self.position.is_in_check(color) {
+    fn checked_king_square(&self, position: &Position) -> Option<u8> {
+        let color = position.side_to_move();
+        if !position.is_in_check(color) {
             return None;
         }
 
         for square in 0..64 {
-            if let Some(piece) = self.position.piece_at(square) {
+            if let Some(piece) = position.piece_at(square) {
                 if piece.color == color && piece.kind == PieceKind::King {
                     return Some(square);
                 }
@@ -1910,6 +2174,7 @@ impl eframe::App for RChessGui {
         self.poll_engine();
         self.poll_match_engines();
         self.poll_analysis_engine();
+        self.handle_history_keyboard(ui.ctx());
         self.show_top_panel(ui);
         self.show_left_panel(ui);
         self.show_side_panel(ui);
@@ -2128,6 +2393,21 @@ fn color_name(color: Color) -> &'static str {
         Color::Black => "Black",
     }
 }
+
+fn score_from_side_to_move_to_white(side_to_move: Color, score_cp: i32) -> i32 {
+    match side_to_move {
+        Color::White => score_cp,
+        Color::Black => -score_cp,
+    }
+}
+
+fn score_from_fen_side_to_move_to_white(fen: &str, score_cp: i32) -> i32 {
+    match fen.split_whitespace().nth(1) {
+        Some("b") => -score_cp,
+        _ => score_cp,
+    }
+}
+
 
 fn start_fullmove_number(fen: &str) -> u32 {
     fen.split_whitespace()

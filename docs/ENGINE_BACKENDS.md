@@ -84,3 +84,14 @@ third_party/stockfish-sf_10/Copying.txt
 The analysis panel reuses the same backend selection as normal engine play. The internal engine, Stockfish 10 and custom UCI executable are all represented as UCI child processes. This is intentional: future analysis must not depend on directly linking a particular engine implementation into the GUI.
 
 The internal `rchess` UCI now prints `info depth ... score cp ... nodes ...` before `bestmove`, so it can be used as the first analysis backend.
+
+## Resource settings placeholder
+
+The GUI exposes two planned resource settings near the backend selector:
+
+```text
+CPU threads target
+Hash target MB
+```
+
+They are not real engine options yet. The internal engine remains single-threaded and does not use a hash table. The purpose of these controls is to reserve the interface and terminology for later patches, where parallel search, transposition tables and memory limits can be implemented deliberately instead of hidden behind ad-hoc fields.

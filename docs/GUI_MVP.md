@@ -61,8 +61,9 @@ GUI process  <->  stdin/stdout  <->  UCI engine process
 - Ручная загрузка FEN.
 - Копирование текущего FEN в поле ввода.
 - Список сыгранных ходов в SAN.
+- Прокрутка партии без удаления хвоста: кнопки `|<`, `<`, `>`, `>|` и клавиши Left/Right/Home/End.
 - `Undo` / `Redo` через пересборку позиции из истории ходов.
-- Панель legal moves для текущей позиции: SAN + UCI.
+- Панель legal moves для просматриваемой позиции: SAN + UCI.
 - Компактный вывод последней строки UCI `info`.
 - Окно выбора promotion-фигуры.
 - PGN-блок для импорта, экспорта и копирования партии через текстовое поле.
@@ -78,7 +79,7 @@ GUI process  <->  stdin/stdout  <->  UCI engine process
 - Контроль времени.
 - Анализ нескольких линий.
 - Полная таблица анализа principal variation.
-- Оценка позиции в отдельном виджете анализа.
+- Полноценный engine-grade виджет оценки с PV, depth и несколькими линиями.
 - Настройки характера игры.
 - Темы оформления.
 
@@ -119,7 +120,7 @@ cargo run --release
 Ближайшие улучшения GUI:
 
 1. Нативный файловый диалог для PGN вместо ручного пути.
-2. Переход по истории ходов без удаления хвоста партии.
+2. Нативный файловый диалог для PGN на базе отдельной зависимости или платформенного слоя.
 3. Кнопка `perft` / `divide` для текущей позиции.
 4. Полный разбор UCI `info`: depth, score, nodes, nps, pv.
 5. Передача будущих настроек характера движку через UCI options.
@@ -208,3 +209,38 @@ This is not a final UX. It is a cleanup pass that prevents the right panel from 
 The right workspace contains a `Game analysis` section. It can analyse the PGN text field, or the current game if the PGN field is empty. It starts the selected UCI backend as a separate process and evaluates positions before and after every played move.
 
 The first metrics are deliberately simple: centipawn loss and a deterministic accuracy value per move, then average accuracy for both sides.
+
+## History navigation and evaluation bar
+
+The board now has a separate history-view cursor. The actual game remains stored in `played_moves`, while `history_view_ply` decides which ply is drawn.
+
+Controls:
+
+```text
+|<  start position
+<   previous ply
+>   next ply
+>|  live/final ply
+Left / Right / Home / End keyboard shortcuts
+```
+
+When the view is not live, the board is read-only. This prevents accidental moves from a historical position.
+
+The evaluation bar is drawn next to the board. It uses, in order:
+
+1. analysed score for the currently displayed ply, if game analysis has produced one;
+2. the latest live UCI score, if it belongs to the live position;
+3. the deterministic static evaluation from `src/search.rs`.
+
+Positive values are shown from White's perspective. This makes analysis navigation, finished games and engine-vs-engine games easier to inspect without adding a full analysis dashboard yet.
+
+## Planned resource settings
+
+The `Engine backend` section now contains GUI-only placeholders for future performance settings:
+
+```text
+CPU threads target
+Hash target MB
+```
+
+They are deliberately not sent to UCI and do not affect search yet. The current engine is still single-threaded and has no transposition table. The controls exist to reserve UX space for future parallel search and memory-heavy search structures.

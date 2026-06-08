@@ -1,6 +1,6 @@
 # rchess
 
-`rchess` — минимальный шахматный движок на Rust. Текущий этап заменяет старый прототип с демонстрационным кодом и случайным выбором хода на рабочее ядро: FEN, генератор легальных ходов, применение ходов, perft-проверки, простая оценка позиции, alpha-beta поиск, UCI-интерфейс, MVP GUI, начальную работу с PGN/SAN и первый слой анализа партий.
+`rchess` — минимальный шахматный движок на Rust. Текущий этап заменяет старый прототип с демонстрационным кодом и случайным выбором хода на рабочее ядро: FEN, генератор легальных ходов, применение ходов, perft-проверки, простая оценка позиции, alpha-beta поиск, UCI-интерфейс, MVP GUI, начальную работу с PGN/SAN и первый слой анализа партий, навигацию по истории партии и визуальную шкалу оценки позиции.
 
 ## Что уже есть
 
@@ -14,10 +14,10 @@
 - Поиск лучшего хода: negamax + alpha-beta + quiescence на взятиях.
 - Простая статическая оценка: материал, центр, развитие пешек, пара слонов.
 - UCI-протокол для подключения к GUI вроде Cute Chess, Arena, Banksia и другим.
-- Rust GUI MVP на `egui/eframe`, включая левую панель управления, верхнее меню, drag-and-drop, undo/redo, SAN-историю, legal moves panel и вывод UCI `info`.
+- Rust GUI MVP на `egui/eframe`, включая левую панель управления, верхнее меню, drag-and-drop, undo/redo, прокрутку партии стрелками, SAN-историю, legal moves panel, визуальную шкалу оценки и вывод UCI `info`.
 - Выбор backend-движка в GUI: наш UCI, vendored Stockfish 10 или любой внешний UCI executable.
 - Базовый PGN/SAN: импорт, экспорт, FEN-tag, GUI-блок, CLI-проверка и тесты неоднозначной SAN-нотации.
-- Первый анализ PGN/истории партии через UCI: оценка до/после каждого хода, centipawn loss, простая accuracy сторон и текстовый отчёт.
+- Первый анализ PGN/истории партии через UCI: оценка до/после каждого хода, centipawn loss, простая accuracy сторон, текстовый отчёт и переход к позиции по строке анализа.
 
 Ядро правил, поиск, UCI и PGN остаются без внешних зависимостей. GUI использует `egui/eframe` как отдельный интерфейсный слой.
 
@@ -135,7 +135,7 @@ src/pgn.rs
 
 1. Продолжать добивать надёжность ядра: больше depth 3/4 `perft divide`-позиций, невозможность взятия короля, дополнительные PGN cases и будущие правила результата партии.
 2. Улучшить силу: transposition table, killer/history move ordering, iterative deepening, нормальный time control.
-3. Улучшить GUI: нативный файловый диалог вместо ручного пути, переход по истории ходов, perft/divide-панель, более плотная таблица анализа и сохранение анализа в PGN-комментарии.
+3. Улучшить GUI: нативный файловый диалог вместо ручного пути, perft/divide-панель, более плотная таблица анализа, сохранение анализа в PGN-комментарии и нормальная панель настроек движка.
 4. Развивать engine-vs-engine: часы, остановка, adjudication, повторные партии и сохранение матчей.
 5. Начать выносить методики поиска в явные модули, чтобы потом можно было сравнивать и комбинировать стратегии.
 
@@ -168,11 +168,14 @@ MVP умеет:
 - импортировать, экспортировать, копировать, открывать и сохранять PGN;
 - отменять и повторять ходы через `Undo` / `Redo`;
 - показывать список ходов в SAN;
-- показывать legal moves текущей позиции в левой панели;
+- прокручивать партию кнопками и клавишами Left/Right, Home/End без удаления хвоста партии;
+- показывать legal moves текущей просматриваемой позиции в левой панели;
+- показывать визуальную шкалу оценки позиции рядом с доской;
 - показывать компактный вывод UCI `info`;
 - запускать engine-vs-engine матч из двух реальных UCI-процессов;
 - показывать UCI-лог;
-- анализировать PGN/текущую историю через выбранный UCI backend и считать первичную accuracy сторон.
+- анализировать PGN/текущую историю через выбранный UCI backend и считать первичную accuracy сторон;
+- хранить GUI-only заглушки будущих resource settings: целевое число CPU threads и размер hash в MB, пока без влияния на поиск.
 
 Основные действия разнесены: верхняя строка стала меню `File / Game / Engine / Match / Analysis`, частые игровые кнопки и legal moves вынесены в левую панель, а справа остался workspace для PGN, backend, match, анализа и логов.
 
@@ -186,3 +189,11 @@ MVP умеет:
 ## Engine-vs-engine foundation
 
 В библиотеке есть `src/matchplay.rs`: небольшой контроллер режима `engine vs engine`. Он хранит два UCI-слота, текущую позицию, историю ходов, PGN-лог и лимит поиска активного движка. GUI теперь умеет запускать два реальных UCI child process и использовать этот контроллер как владельца партии.
+
+## History navigation and evaluation bar
+
+GUI now separates the actual game history from the currently displayed ply. The board can be moved through the game with the left-panel controls or keyboard shortcuts `Left`, `Right`, `Home` and `End` when no text field is focused. While an old ply is displayed the board is read-only; returning to the live ply re-enables normal play.
+
+A compact evaluation bar is drawn next to the board. If analysis data exists for the displayed ply, the bar uses that analysed score converted to White perspective. Otherwise it falls back to the internal deterministic static evaluation. This is only a visual guide, not a replacement for full search.
+
+The engine resource controls are intentionally placeholders: `CPU threads target` and `Hash target MB` are stored in the GUI only. The current engine remains single-threaded and does not allocate a transposition table yet.
