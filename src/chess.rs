@@ -997,6 +997,22 @@ mod tests {
         }
     }
 
+
+    #[test]
+    fn selected_perft_divide_positions_match_depth_3_totals() {
+        let cases = [
+            (STARTPOS_FEN, 3, 8_902_u64),
+            ("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1", 3, 97_862),
+            ("8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1", 3, 2_812),
+        ];
+
+        for (fen, depth, expected) in cases {
+            let position = Position::from_fen(fen).unwrap();
+            let divide = position.perft_divide(depth);
+            assert_eq!(divide.iter().map(|(_, nodes)| *nodes).sum::<u64>(), expected, "divide depth {depth} sum failed for {fen}");
+        }
+    }
+
     #[test]
     fn pinned_rook_can_only_move_along_pin_line() {
         let position = Position::from_fen("4r2k/8/8/8/8/8/4R3/4K3 w - - 0 1").unwrap();
@@ -1116,6 +1132,39 @@ mod tests {
         let chess_move = position.parse_uci_move("e4d3").unwrap();
         position.make_legal_move(chess_move).unwrap();
         assert_eq!(position.to_fen(), "4k3/8/8/8/8/3p4/8/4K3 w - - 0 2");
+    }
+
+
+    #[test]
+    fn explicit_underpromotion_applies_selected_piece() {
+        let mut knight = Position::from_fen("4k3/P7/8/8/8/8/8/4K3 w - - 0 1").unwrap();
+        let chess_move = knight.parse_uci_move("a7a8n").unwrap();
+        knight.make_legal_move(chess_move).unwrap();
+        assert_eq!(knight.to_fen(), "N3k3/8/8/8/8/8/8/4K3 b - - 0 1");
+
+        let mut capture_rook = Position::from_fen("1r2k3/P7/8/8/8/8/8/4K3 w - - 0 1").unwrap();
+        let chess_move = capture_rook.parse_uci_move("a7b8r").unwrap();
+        capture_rook.make_legal_move(chess_move).unwrap();
+        assert_eq!(capture_rook.to_fen(), "1R2k3/8/8/8/8/8/8/4K3 b - - 0 1");
+    }
+
+    #[test]
+    fn black_en_passant_that_exposes_own_king_is_illegal() {
+        let position = Position::from_fen("4k3/8/8/8/3Pp3/8/8/4R2K b - d3 0 1").unwrap();
+        assert!(position.parse_uci_move("e4d3").is_none());
+    }
+
+    #[test]
+    fn en_passant_capture_resets_halfmove_clock_for_both_colors() {
+        let mut white = Position::from_fen("4k3/8/8/3pP3/8/8/8/4K3 w - d6 19 42").unwrap();
+        let chess_move = white.parse_uci_move("e5d6").unwrap();
+        white.make_legal_move(chess_move).unwrap();
+        assert_eq!(white.to_fen(), "4k3/8/3P4/8/8/8/8/4K3 b - - 0 42");
+
+        let mut black = Position::from_fen("4k3/8/8/8/3Pp3/8/8/4K3 b - d3 19 42").unwrap();
+        let chess_move = black.parse_uci_move("e4d3").unwrap();
+        black.make_legal_move(chess_move).unwrap();
+        assert_eq!(black.to_fen(), "4k3/8/8/8/8/3p4/8/4K3 w - - 0 43");
     }
 
     #[test]

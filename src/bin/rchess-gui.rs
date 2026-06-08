@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use eframe::egui;
 use rchess::chess::{square_name, ChessMove, Color, PieceKind, Position, STARTPOS_FEN};
+use rchess::matchplay::{EngineMatchController, SearchLimit, UciEngineSlot};
 use rchess::pgn::{export_pgn, move_to_san, parse_pgn, position_after_moves};
 
 fn main() -> eframe::Result<()> {
@@ -58,6 +59,7 @@ struct RChessGui {
     drag_pointer: Option<egui::Pos2>,
     promotion_request: Option<PromotionRequest>,
     played_moves: Vec<ChessMove>,
+    redo_moves: Vec<ChessMove>,
     player_color: Color,
     auto_engine: bool,
     flipped: bool,
@@ -72,6 +74,22 @@ struct RChessGui {
     engine: Option<UciEngine>,
     engine_rx: Option<Receiver<String>>,
     engine_log: Vec<String>,
+    last_engine_info: String,
+    match_white_path: String,
+    match_black_path: String,
+    match_depth: u8,
+    match_movetime_ms: u64,
+    match_max_plies: u32,
+    match_controller: Option<EngineMatchController>,
+    match_white_engine: Option<UciEngine>,
+    match_black_engine: Option<UciEngine>,
+    match_white_rx: Option<Receiver<String>>,
+    match_black_rx: Option<Receiver<String>>,
+    match_waiting_for: Option<Color>,
+    match_running: bool,
+    match_status: String,
+    match_log: Vec<String>,
+    match_pgn_text: String,
 }
 
 #[derive(Clone)]
@@ -102,6 +120,7 @@ impl RChessGui {
             drag_pointer: None,
             promotion_request: None,
             played_moves: Vec::new(),
+            redo_moves: Vec::new(),
             player_color: Color::White,
             auto_engine: true,
             flipped: false,
@@ -116,12 +135,29 @@ impl RChessGui {
             engine: None,
             engine_rx: None,
             engine_log: Vec::new(),
+            last_engine_info: String::new(),
+            match_white_path: String::new(),
+            match_black_path: String::new(),
+            match_depth: 3,
+            match_movetime_ms: 0,
+            match_max_plies: 160,
+            match_controller: None,
+            match_white_engine: None,
+            match_black_engine: None,
+            match_white_rx: None,
+            match_black_rx: None,
+            match_waiting_for: None,
+            match_running: false,
+            match_status: "Engine match is idle".to_string(),
+            match_log: Vec::new(),
+            match_pgn_text: String::new(),
         };
         app.refresh_game_status();
         app
     }
 
     fn new_game(&mut self) {
+        self.stop_engine_match("Engine match stopped by new game");
         self.position = Position::startpos();
         self.fen_input = STARTPOS_FEN.to_string();
         self.game_start_fen = STARTPOS_FEN.to_string();
@@ -131,6 +167,7 @@ impl RChessGui {
         self.drag_pointer = None;
         self.promotion_request = None;
         self.played_moves.clear();
+        self.redo_moves.clear();
         self.pgn_text.clear();
         self.pending_engine = false;
         self.engine_status = "New game".to_string();
@@ -143,6 +180,7 @@ impl RChessGui {
     }
 
     fn load_fen(&mut self) {
+        self.stop_engine_match("Engine match stopped by FEN load");
         match Position::from_fen(self.fen_input.trim()) {
             Ok(position) => {
                 self.position = position;
@@ -154,6 +192,7 @@ impl RChessGui {
                 self.drag_pointer = None;
                 self.promotion_request = None;
                 self.played_moves.clear();
+                self.redo_moves.clear();
                 self.pending_engine = false;
                 self.engine_status = "FEN loaded".to_string();
                 self.refresh_game_status();
@@ -216,6 +255,7 @@ impl RChessGui {
     }
 
     fn load_pgn_from_text(&mut self) {
+        self.stop_engine_match("Engine match stopped by PGN load");
         match parse_pgn(&self.pgn_text).and_then(|game| {
             let position = position_after_moves(&game.start_fen, &game.moves)?;
             Ok((game, position))
@@ -223,6 +263,7 @@ impl RChessGui {
             Ok((game, position)) => {
                 self.game_start_fen = game.start_fen;
                 self.played_moves = game.moves;
+                self.redo_moves.clear();
                 self.position = position;
                 self.fen_input = self.position.to_fen();
                 self.selected = None;
@@ -258,7 +299,7 @@ impl RChessGui {
     }
 
     fn select_square(&mut self, square: u8) {
-        if self.pending_engine || self.promotion_request.is_some() {
+        if self.pending_engine || self.match_running || self.promotion_request.is_some() {
             return;
         }
 
@@ -281,7 +322,7 @@ impl RChessGui {
     }
 
     fn select_piece(&mut self, square: u8) -> bool {
-        if self.pending_engine || self.promotion_request.is_some() {
+        if self.pending_engine || self.match_running || self.promotion_request.is_some() {
             return false;
         }
         let Some(piece) = self.position.piece_at(square) else {
@@ -311,6 +352,7 @@ impl RChessGui {
     fn should_auto_engine_move(&self) -> bool {
         self.auto_engine
             && !self.pending_engine
+            && !self.match_running
             && self.position.side_to_move() != self.player_color
             && !self.position.is_checkmate()
             && !self.position.is_stalemate()
@@ -352,8 +394,7 @@ impl RChessGui {
     fn apply_user_move(&mut self, chess_move: ChessMove) {
         match self.position.make_legal_move(chess_move) {
             Ok(()) => {
-                self.played_moves.push(chess_move);
-                self.fen_input = self.position.to_fen();
+                self.record_applied_move(chess_move);
                 self.clear_selection();
                 self.promotion_request = None;
                 self.refresh_game_status();
@@ -364,6 +405,66 @@ impl RChessGui {
             }
             Err(error) => {
                 self.engine_status = error;
+            }
+        }
+    }
+
+    fn record_applied_move(&mut self, chess_move: ChessMove) {
+        self.played_moves.push(chess_move);
+        self.redo_moves.clear();
+        self.fen_input = self.position.to_fen();
+    }
+
+    fn rebuild_position_from_history(&mut self) -> Result<(), String> {
+        let mut position = Position::from_fen(&self.game_start_fen)?;
+        for chess_move in &self.played_moves {
+            position.make_legal_move(*chess_move)?;
+        }
+        self.position = position;
+        self.fen_input = self.position.to_fen();
+        self.clear_selection();
+        self.promotion_request = None;
+        self.refresh_game_status();
+        Ok(())
+    }
+
+    fn undo_move(&mut self) {
+        if self.pending_engine || self.match_running {
+            self.engine_status = "Cannot undo while an engine is thinking".to_string();
+            return;
+        }
+        let Some(chess_move) = self.played_moves.pop() else {
+            self.engine_status = "Nothing to undo".to_string();
+            return;
+        };
+        self.redo_moves.push(chess_move);
+        match self.rebuild_position_from_history() {
+            Ok(()) => self.engine_status = format!("Undid {}", chess_move.to_uci()),
+            Err(error) => self.engine_status = format!("Undo error: {error}"),
+        }
+    }
+
+    fn redo_move(&mut self) {
+        if self.pending_engine || self.match_running {
+            self.engine_status = "Cannot redo while an engine is thinking".to_string();
+            return;
+        }
+        let Some(chess_move) = self.redo_moves.pop() else {
+            self.engine_status = "Nothing to redo".to_string();
+            return;
+        };
+        match self.position.make_legal_move(chess_move) {
+            Ok(()) => {
+                self.played_moves.push(chess_move);
+                self.fen_input = self.position.to_fen();
+                self.clear_selection();
+                self.promotion_request = None;
+                self.refresh_game_status();
+                self.engine_status = format!("Redid {}", chess_move.to_uci());
+            }
+            Err(error) => {
+                self.redo_moves.push(chess_move);
+                self.engine_status = format!("Redo error: {error}");
             }
         }
     }
@@ -414,7 +515,7 @@ impl RChessGui {
     }
 
     fn request_engine_move(&mut self) {
-        if self.pending_engine {
+        if self.pending_engine || self.match_running {
             return;
         }
         if self.position.is_checkmate() || self.position.is_stalemate() {
@@ -491,6 +592,10 @@ impl RChessGui {
             self.engine_status = "Engine is ready".to_string();
             return;
         }
+        if line.starts_with("info ") {
+            self.last_engine_info = compact_uci_info_line(&line);
+            return;
+        }
 
         let Some(rest) = line.strip_prefix("bestmove ") else {
             return;
@@ -506,8 +611,7 @@ impl RChessGui {
         match self.position.parse_uci_move(move_text) {
             Some(chess_move) => match self.position.make_legal_move(chess_move) {
                 Ok(()) => {
-                    self.played_moves.push(chess_move);
-                    self.fen_input = self.position.to_fen();
+                    self.record_applied_move(chess_move);
                     self.engine_status = format!("Engine played {move_text}");
                     self.clear_selection();
                     self.refresh_game_status();
@@ -518,6 +622,267 @@ impl RChessGui {
             },
             None => {
                 self.engine_status = format!("Engine returned illegal move: {move_text}");
+            }
+        }
+    }
+
+
+    fn start_engine_match(&mut self) {
+        if self.pending_engine {
+            self.engine_status = "Stop the single-engine search before starting a match".to_string();
+            return;
+        }
+        self.stop_engine_match("Restarting engine match");
+
+        let white_command = match self.match_command(&self.match_white_path, "White") {
+            Ok(command) => command,
+            Err(error) => {
+                self.match_status = error;
+                return;
+            }
+        };
+        let black_command = match self.match_command(&self.match_black_path, "Black") {
+            Ok(command) => command,
+            Err(error) => {
+                self.match_status = error;
+                return;
+            }
+        };
+
+        let limit = SearchLimit::depth_or_movetime(self.match_depth, self.match_movetime_ms);
+        let white_name = white_command.label.clone();
+        let black_name = black_command.label.clone();
+        let white_slot = UciEngineSlot::new(white_name.clone(), white_command.program.to_string_lossy().to_string())
+            .with_args(white_command.args.clone())
+            .with_limit(limit.clone());
+        let black_slot = UciEngineSlot::new(black_name.clone(), black_command.program.to_string_lossy().to_string())
+            .with_args(black_command.args.clone())
+            .with_limit(limit);
+
+        let start_fen = self.position.to_fen();
+        let controller = match EngineMatchController::from_fen(&start_fen, white_slot, black_slot) {
+            Ok(controller) => controller,
+            Err(error) => {
+                self.match_status = format!("Match start FEN error: {error}");
+                return;
+            }
+        };
+
+        let (white_engine, white_rx) = match UciEngine::spawn(white_command) {
+            Ok(value) => value,
+            Err(error) => {
+                self.match_status = format!("White engine start error: {error}");
+                return;
+            }
+        };
+        let (black_engine, black_rx) = match UciEngine::spawn(black_command) {
+            Ok(value) => value,
+            Err(error) => {
+                self.match_status = format!("Black engine start error: {error}");
+                return;
+            }
+        };
+
+        self.game_start_fen = start_fen;
+        self.played_moves.clear();
+        self.redo_moves.clear();
+        self.match_controller = Some(controller);
+        self.match_white_engine = Some(white_engine);
+        self.match_black_engine = Some(black_engine);
+        self.match_white_rx = Some(white_rx);
+        self.match_black_rx = Some(black_rx);
+        self.match_waiting_for = None;
+        self.match_running = true;
+        self.match_log.clear();
+        self.match_pgn_text.clear();
+        self.match_status = format!("Match started: {white_name} vs {black_name}");
+
+        let _ = self.send_to_match_engine(Color::White, "uci");
+        let _ = self.send_to_match_engine(Color::White, "isready");
+        let _ = self.send_to_match_engine(Color::Black, "uci");
+        let _ = self.send_to_match_engine(Color::Black, "isready");
+        self.request_next_match_move();
+    }
+
+    fn match_command(&self, path: &str, color_label: &str) -> Result<UciCommand, String> {
+        let normalized = normalize_path_input(path);
+        if normalized.is_empty() {
+            let current = env::current_exe()
+                .map_err(|error| format!("cannot locate current executable for {color_label}: {error}"))?;
+            Ok(UciCommand {
+                label: format!("rchess {color_label}"),
+                program: current,
+                args: vec!["--engine-mode".to_string()],
+            })
+        } else {
+            validate_executable_path(&normalized, color_label)?;
+            let program = PathBuf::from(&normalized);
+            let label = program
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .map(|value| format!("{color_label} {value}"))
+                .unwrap_or_else(|| format!("{color_label} UCI"));
+            Ok(UciCommand { label, program, args: Vec::new() })
+        }
+    }
+
+    fn stop_engine_match(&mut self, status: impl Into<String>) {
+        self.match_white_engine = None;
+        self.match_black_engine = None;
+        self.match_white_rx = None;
+        self.match_black_rx = None;
+        self.match_waiting_for = None;
+        self.match_running = false;
+        self.match_status = status.into();
+    }
+
+    fn request_next_match_move(&mut self) {
+        if !self.match_running || self.match_waiting_for.is_some() {
+            return;
+        }
+
+        let Some(controller) = self.match_controller.as_mut() else {
+            self.match_status = "No match controller".to_string();
+            self.match_running = false;
+            return;
+        };
+
+        if controller.result != "*" || controller.position.is_checkmate() || controller.position.is_stalemate() {
+            self.match_running = false;
+            self.match_status = format!("Match finished: {}", controller.result);
+            self.update_match_pgn_text();
+            return;
+        }
+        if controller.played_moves.len() as u32 >= self.match_max_plies {
+            self.match_running = false;
+            self.match_status = format!("Match stopped after {} plies", self.match_max_plies);
+            self.update_match_pgn_text();
+            return;
+        }
+
+        let color = controller.position.side_to_move();
+        let position_command = controller.position_command();
+        let go_command = controller.current_go_command();
+        controller.start_thinking();
+
+        if let Err(error) = self.send_to_match_engine(color, &position_command) {
+            self.match_status = error;
+            self.match_running = false;
+            return;
+        }
+        if let Err(error) = self.send_to_match_engine(color, &go_command) {
+            self.match_status = error;
+            self.match_running = false;
+            return;
+        }
+        self.match_waiting_for = Some(color);
+        self.match_status = format!("{} engine is thinking: {go_command}", color_name(color));
+    }
+
+    fn send_to_match_engine(&mut self, color: Color, command: &str) -> Result<(), String> {
+        let engine = match color {
+            Color::White => &mut self.match_white_engine,
+            Color::Black => &mut self.match_black_engine,
+        };
+        let Some(engine) = engine else {
+            return Err(format!("{} match engine is not running", color_name(color)));
+        };
+        engine
+            .send(command)
+            .map_err(|error| format!("{} match engine write error: {error}", color_name(color)))
+    }
+
+    fn poll_match_engines(&mut self) {
+        let mut white_lines = Vec::new();
+        if let Some(rx) = &self.match_white_rx {
+            while let Ok(line) = rx.try_recv() {
+                white_lines.push(line);
+            }
+        }
+        for line in white_lines {
+            self.handle_match_engine_line(Color::White, line);
+        }
+
+        let mut black_lines = Vec::new();
+        if let Some(rx) = &self.match_black_rx {
+            while let Ok(line) = rx.try_recv() {
+                black_lines.push(line);
+            }
+        }
+        for line in black_lines {
+            self.handle_match_engine_line(Color::Black, line);
+        }
+    }
+
+    fn handle_match_engine_line(&mut self, color: Color, line: String) {
+        self.match_log.push(format!("[{}] {line}", color_name(color)));
+        if self.match_log.len() > 220 {
+            let extra = self.match_log.len() - 220;
+            self.match_log.drain(0..extra);
+        }
+
+        if let Some(name) = line.strip_prefix("id name ") {
+            self.match_status = format!("{} engine: {name}", color_name(color));
+            return;
+        }
+        if line == "uciok" || line == "readyok" || line.starts_with("info ") {
+            if line.starts_with("info ") {
+                self.match_status = format!("{} {}", color_name(color), compact_uci_info_line(&line));
+            }
+            return;
+        }
+
+        if !line.starts_with("bestmove ") {
+            return;
+        }
+        if self.match_waiting_for != Some(color) {
+            self.match_status = format!("Ignored out-of-turn bestmove from {}", color_name(color));
+            return;
+        }
+        self.match_waiting_for = None;
+
+        let result = if let Some(controller) = self.match_controller.as_mut() {
+            controller.record_bestmove(&line).map(|_| {
+                (
+                    controller.position.clone(),
+                    controller.played_moves.clone(),
+                    controller.result.clone(),
+                )
+            })
+        } else {
+            Err("No match controller".to_string())
+        };
+
+        match result {
+            Ok((position, moves, result)) => {
+                self.position = position;
+                self.played_moves = moves;
+                self.redo_moves.clear();
+                self.fen_input = self.position.to_fen();
+                self.refresh_game_status();
+                self.update_match_pgn_text();
+                if result == "*" {
+                    self.request_next_match_move();
+                } else {
+                    self.match_running = false;
+                    self.match_status = format!("Match finished: {result}");
+                }
+            }
+            Err(error) => {
+                self.match_running = false;
+                self.match_status = format!("Match move error: {error}");
+            }
+        }
+    }
+
+    fn update_match_pgn_text(&mut self) {
+        if let Some(controller) = &self.match_controller {
+            match controller.pgn_log() {
+                Ok(text) => {
+                    self.match_pgn_text = text;
+                    self.pgn_text = self.match_pgn_text.clone();
+                }
+                Err(error) => self.match_status = format!("Match PGN error: {error}"),
             }
         }
     }
@@ -590,6 +955,18 @@ impl RChessGui {
         rows
     }
 
+
+    fn legal_move_rows(&self) -> Vec<String> {
+        let mut rows = Vec::new();
+        let mut moves = self.position.legal_moves();
+        moves.sort_by_key(|chess_move| chess_move.to_uci());
+        for chess_move in moves {
+            let san = move_to_san(&self.position, chess_move).unwrap_or_else(|_| chess_move.to_uci());
+            rows.push(format!("{:<8} {}", san, chess_move.to_uci()));
+        }
+        rows
+    }
+
     fn show_promotion_dialog(&mut self, ctx: &egui::Context) {
         let Some(request) = self.promotion_request.clone() else {
             return;
@@ -640,10 +1017,22 @@ impl RChessGui {
                     self.new_game();
                 }
                 if ui
-                    .add_enabled(!self.pending_engine, egui::Button::new("Engine move"))
+                    .add_enabled(!self.pending_engine && !self.match_running, egui::Button::new("Engine move"))
                     .clicked()
                 {
                     self.request_engine_move();
+                }
+                if ui
+                    .add_enabled(!self.pending_engine && !self.match_running && !self.played_moves.is_empty(), egui::Button::new("Undo"))
+                    .clicked()
+                {
+                    self.undo_move();
+                }
+                if ui
+                    .add_enabled(!self.pending_engine && !self.match_running && !self.redo_moves.is_empty(), egui::Button::new("Redo"))
+                    .clicked()
+                {
+                    self.redo_move();
                 }
                 ui.add(egui::Slider::new(&mut self.search_depth, 1..=8).text("Depth"));
                 ui.checkbox(&mut self.auto_engine, "Auto engine reply");
@@ -788,12 +1177,34 @@ impl RChessGui {
                 ui.heading("Moves SAN");
                 egui::ScrollArea::vertical()
                     .id_salt("moves_scroll")
-                    .max_height(140.0)
+                    .max_height(120.0)
                     .show(ui, |ui| {
                         for row in self.san_move_rows() {
                             ui.monospace(row);
                         }
                     });
+
+                ui.separator();
+                ui.heading("Legal moves");
+                egui::ScrollArea::vertical()
+                    .id_salt("legal_moves_scroll")
+                    .max_height(110.0)
+                    .show(ui, |ui| {
+                        for row in self.legal_move_rows() {
+                            ui.monospace(row);
+                        }
+                    });
+
+                ui.separator();
+                self.show_engine_match_panel(ui);
+
+                ui.separator();
+                ui.heading("Engine info");
+                if self.last_engine_info.is_empty() {
+                    ui.label("No search info yet");
+                } else {
+                    ui.monospace(&self.last_engine_info);
+                }
 
                 ui.separator();
                 ui.horizontal(|ui| {
@@ -815,6 +1226,58 @@ impl RChessGui {
         if previous_engine_backend != self.engine_backend {
             self.stop_engine("Engine backend changed");
         }
+    }
+
+
+    fn show_engine_match_panel(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Engine vs engine");
+        ui.label(&self.match_status);
+        ui.label("Empty path uses this GUI binary as rchess --engine-mode.");
+        ui.horizontal(|ui| {
+            ui.label("White");
+            ui.text_edit_singleline(&mut self.match_white_path);
+        });
+        ui.horizontal(|ui| {
+            ui.label("Black");
+            ui.text_edit_singleline(&mut self.match_black_path);
+        });
+        ui.horizontal(|ui| {
+            ui.add(egui::Slider::new(&mut self.match_depth, 1..=8).text("Depth"));
+            ui.add(egui::DragValue::new(&mut self.match_movetime_ms).speed(50.0).prefix("ms "));
+        });
+        ui.horizontal(|ui| {
+            ui.label("Max plies");
+            ui.add(egui::DragValue::new(&mut self.match_max_plies).range(2..=600).speed(2.0));
+        });
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(!self.match_running && !self.pending_engine, egui::Button::new("Start match"))
+                .clicked()
+            {
+                self.start_engine_match();
+            }
+            if ui
+                .add_enabled(self.match_running, egui::Button::new("Stop match"))
+                .clicked()
+            {
+                self.stop_engine_match("Engine match stopped");
+            }
+            if ui.button("Copy match PGN").clicked() {
+                if self.match_pgn_text.trim().is_empty() {
+                    self.update_match_pgn_text();
+                }
+                ui.ctx().copy_text(self.match_pgn_text.clone());
+                self.match_status = "Match PGN copied to clipboard".to_string();
+            }
+        });
+        egui::ScrollArea::vertical()
+            .id_salt("match_log_scroll")
+            .max_height(100.0)
+            .show(ui, |ui| {
+                for line in &self.match_log {
+                    ui.monospace(line);
+                }
+            });
     }
 
     fn show_board(&mut self, ui: &mut egui::Ui) {
@@ -1061,12 +1524,13 @@ impl RChessGui {
 impl eframe::App for RChessGui {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_engine();
+        self.poll_match_engines();
         self.show_top_panel(ui);
         self.show_side_panel(ui);
         self.show_board(ui);
         self.show_promotion_dialog(ui.ctx());
 
-        if self.pending_engine {
+        if self.pending_engine || self.match_running {
             ui.ctx().request_repaint_after(Duration::from_millis(80));
         }
     }
@@ -1137,6 +1601,46 @@ impl Drop for UciEngine {
         let _ = writeln!(self.stdin, "quit");
         let _ = self.stdin.flush();
         let _ = self.child.kill();
+    }
+}
+
+
+fn compact_uci_info_line(line: &str) -> String {
+    let mut result = Vec::new();
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    let mut index = 0;
+    while index < parts.len() {
+        match parts[index] {
+            "depth" | "seldepth" | "nodes" | "nps" | "time" => {
+                if let Some(value) = parts.get(index + 1) {
+                    result.push(format!("{} {}", parts[index], value));
+                    index += 2;
+                } else {
+                    index += 1;
+                }
+            }
+            "score" => {
+                if let (Some(kind), Some(value)) = (parts.get(index + 1), parts.get(index + 2)) {
+                    result.push(format!("score {} {}", kind, value));
+                    index += 3;
+                } else {
+                    index += 1;
+                }
+            }
+            "pv" => {
+                let pv = parts[index + 1..].join(" ");
+                if !pv.is_empty() {
+                    result.push(format!("pv {pv}"));
+                }
+                break;
+            }
+            _ => index += 1,
+        }
+    }
+    if result.is_empty() {
+        line.to_string()
+    } else {
+        result.join(" | ")
     }
 }
 

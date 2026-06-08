@@ -477,6 +477,40 @@ mod tests {
         assert_eq!(position.side_to_move(), Color::White);
     }
 
+
+    #[test]
+    fn parses_and_exports_knight_file_disambiguation() {
+        let start_fen = "4k3/8/8/8/8/8/8/1N2KN2 w - - 0 1";
+        let mut position = Position::from_fen(start_fen).unwrap();
+        let chess_move = position.parse_uci_move("b1d2").unwrap();
+        assert_eq!(move_to_san(&position, chess_move).unwrap(), "Nbd2");
+        position.make_legal_move(chess_move).unwrap();
+
+        let pgn = format!("[SetUp \"1\"]\n[FEN \"{start_fen}\"]\n\n1. Nbd2 *");
+        let game = parse_pgn(&pgn).unwrap();
+        assert_eq!(game.moves, vec![chess_move]);
+    }
+
+    #[test]
+    fn parses_and_exports_rook_rank_disambiguation() {
+        let start_fen = "4k3/8/8/8/8/R7/8/R3K3 w - - 0 1";
+        let position = Position::from_fen(start_fen).unwrap();
+        let chess_move = position.parse_uci_move("a1a2").unwrap();
+        assert_eq!(move_to_san(&position, chess_move).unwrap(), "R1a2");
+
+        let pgn = format!("[SetUp \"1\"]\n[FEN \"{start_fen}\"]\n\n1. R1a2 *");
+        let game = parse_pgn(&pgn).unwrap();
+        assert_eq!(game.moves, vec![chess_move]);
+    }
+
+    #[test]
+    fn rejects_ambiguous_san_without_required_disambiguation() {
+        let start_fen = "4k3/8/8/8/8/8/8/1N2KN2 w - - 0 1";
+        let pgn = format!("[SetUp \"1\"]\n[FEN \"{start_fen}\"]\n\n1. Nd2 *");
+        let error = parse_pgn(&pgn).unwrap_err();
+        assert!(error.contains("cannot parse PGN move") || error.contains("ambiguous PGN move"));
+    }
+
     #[test]
     fn moves_to_san_returns_plain_san_list() {
         let game = parse_pgn("1. e4 e5 2. Nf3 Nc6 *").unwrap();
