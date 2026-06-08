@@ -85,13 +85,17 @@ The analysis panel reuses the same backend selection as normal engine play. The 
 
 The internal `rchess` UCI now prints `info depth ... score cp ... nodes ...` before `bestmove`, so it can be used as the first analysis backend.
 
-## Resource settings placeholder
+## Internal rchess resource settings
 
-The GUI exposes two planned resource settings near the backend selector:
+The GUI exposes real search settings for the internal `rchess` backend near the backend selector:
 
 ```text
-CPU threads target
-Hash target MB
+deterministic_multithread
+max_threads
+granularity
+Hash MB
 ```
 
-They are not real engine options yet. The internal engine remains single-threaded and does not use a hash table. The purpose of these controls is to reserve the interface and terminology for later patches, where parallel search, transposition tables and memory limits can be implemented deliberately instead of hidden behind ad-hoc fields.
+They are sent as UCI `setoption` commands before internal `rchess` searches. External UCI engines are not configured through the project-specific `deterministic_multithread` and `granularity` options. The current design keeps the feature transparent: deterministic root-splitting is opt-in, root move order is fixed, and the shared TT uses atomic replace-by-depth+age entries.
+
+See [`SEARCH_PARALLELISM.md`](SEARCH_PARALLELISM.md).

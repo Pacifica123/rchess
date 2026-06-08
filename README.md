@@ -1,6 +1,6 @@
 # rchess
 
-`rchess` — минимальный шахматный движок на Rust. Текущий этап заменяет старый прототип с демонстрационным кодом и случайным выбором хода на рабочее ядро: FEN, генератор легальных ходов, применение ходов, perft-проверки, простая оценка позиции, alpha-beta поиск, UCI-интерфейс, MVP GUI, начальную работу с PGN/SAN и первый слой анализа партий, навигацию по истории партии и визуальную шкалу оценки позиции.
+`rchess` — минимальный шахматный движок на Rust. Текущий этап заменяет старый прототип с демонстрационным кодом и случайным выбором хода на рабочее ядро: FEN, генератор легальных ходов, применение ходов, perft-проверки, простая оценка позиции, alpha-beta поиск, детерминированный root-splitting multithread режим, UCI-интерфейс, MVP GUI, начальную работу с PGN/SAN и первый слой анализа партий, навигацию по истории партии и визуальную шкалу оценки позиции.
 
 ## Что уже есть
 
@@ -12,6 +12,7 @@
 - `perft` и `perft divide` для проверки генератора ходов.
 - Набор тестов на стартовую позицию, известные `perft`/`perft divide`-позиции до выбранных depth 3, рокировку, en passant, underpromotion, pinned pieces, discovered/double check, halfmove clock, мат и пат.
 - Поиск лучшего хода: negamax + alpha-beta + quiescence на взятиях.
+- Опциональный детерминированный многопоточный режим: root-splitting, фиксированный порядок root-ходов, общая атомарная transposition table и replace-by-depth+age.
 - Простая статическая оценка: материал, центр, развитие пешек, пара слонов.
 - UCI-протокол для подключения к GUI вроде Cute Chess, Arena, Banksia и другим.
 - Rust GUI MVP на `egui/eframe`, включая левую панель управления, верхнее меню, drag-and-drop, undo/redo, прокрутку партии стрелками, SAN-историю, legal moves panel, визуальную шкалу оценки и вывод UCI `info`.
@@ -87,6 +88,10 @@ cargo test
 - `isready`
 - `ucinewgame`
 - `setoption name Depth value N`
+- `setoption name deterministic_multithread value true|false`
+- `setoption name max_threads value N`
+- `setoption name granularity value N`
+- `setoption name Hash value MB`
 - `position startpos [moves ...]`
 - `position fen <fen> [moves ...]`
 - `go depth N`
@@ -127,6 +132,7 @@ src/pgn.rs
 - [`docs/ENGINE_BACKENDS.md`](docs/ENGINE_BACKENDS.md) — подключение внешних UCI-движков, Stockfish 10 и будущий engine-vs-engine режим.
 - [`docs/ENGINE_MATCH.md`](docs/ENGINE_MATCH.md) — задел под матч двух UCI-движков.
 - [`docs/ANALYSIS.md`](docs/ANALYSIS.md) — первый слой анализа партии через UCI-движок.
+- [`docs/SEARCH_PARALLELISM.md`](docs/SEARCH_PARALLELISM.md) — детерминированный многопоточный root-splitting и shared TT.
 - [`docs/CORE_TESTING.md`](docs/CORE_TESTING.md) — что сейчас проверяется в ядре правил.
 
 ## Дальше
@@ -134,7 +140,7 @@ src/pgn.rs
 Ближайший разумный порядок разработки:
 
 1. Продолжать добивать надёжность ядра: больше depth 3/4 `perft divide`-позиций, невозможность взятия короля, дополнительные PGN cases и будущие правила результата партии.
-2. Улучшить силу: transposition table, killer/history move ordering, iterative deepening, нормальный time control.
+2. Улучшить силу: killer/history move ordering, iterative deepening, нормальный time control, более плотная TT и более умное распределение root/subtree работы.
 3. Улучшить GUI: нативный файловый диалог вместо ручного пути, perft/divide-панель, более плотная таблица анализа, сохранение анализа в PGN-комментарии и нормальная панель настроек движка.
 4. Развивать engine-vs-engine: часы, остановка, adjudication, повторные партии и сохранение матчей.
 5. Начать выносить методики поиска в явные модули, чтобы потом можно было сравнивать и комбинировать стратегии.
@@ -175,7 +181,7 @@ MVP умеет:
 - запускать engine-vs-engine матч из двух реальных UCI-процессов;
 - показывать UCI-лог;
 - анализировать PGN/текущую историю через выбранный UCI backend и считать первичную accuracy сторон;
-- хранить GUI-only заглушки будущих resource settings: целевое число CPU threads и размер hash в MB, пока без влияния на поиск.
+- управлять internal rchess resource settings: `deterministic_multithread`, `max_threads`, `granularity` и `Hash` в MB.
 
 Основные действия разнесены: верхняя строка стала меню `File / Game / Engine / Match / Analysis`, частые игровые кнопки и legal moves вынесены в левую панель, а справа остался workspace для PGN, backend, match, анализа и логов.
 
@@ -196,4 +202,4 @@ GUI now separates the actual game history from the currently displayed ply. The 
 
 A compact evaluation bar is drawn next to the board. If analysis data exists for the displayed ply, the bar uses that analysed score converted to White perspective. Otherwise it falls back to the internal deterministic static evaluation. This is only a visual guide, not a replacement for full search.
 
-The engine resource controls are intentionally placeholders: `CPU threads target` and `Hash target MB` are stored in the GUI only. The current engine remains single-threaded and does not allocate a transposition table yet.
+The engine resource controls are now active for the internal `rchess` backend. `deterministic_multithread` enables deterministic root-splitting, `max_threads` limits worker count, `granularity` controls root chunk size, and `Hash` allocates the shared atomic transposition table. External UCI engines are not configured through these project-specific controls yet.

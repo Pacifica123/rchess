@@ -19,9 +19,13 @@ pub fn run() {
         }
 
         if line == "uci" {
-            println!("id name rchess-reborn 0.2.0");
+            println!("id name rchess-reborn 0.4.0");
             println!("id author ReD_Chajek project");
             println!("option name Depth type spin default 4 min 1 max 8");
+            println!("option name deterministic_multithread type check default false");
+            println!("option name max_threads type spin default 1 min 1 max 64");
+            println!("option name granularity type spin default 1 min 1 max 64");
+            println!("option name Hash type spin default 64 min 1 max 4096");
             println!("uciok");
         } else if line == "isready" {
             println!("readyok");
@@ -37,10 +41,18 @@ pub fn run() {
         } else if let Some(rest) = line.strip_prefix("go") {
             let depth = parse_go_depth(rest).unwrap_or(4);
             engine.set_depth(depth);
+            let settings = engine.settings();
             let best = engine.best_move_with_score(&position);
             match best {
                 Some((chess_move, score)) => {
-                    println!("info depth {depth} score cp {score} nodes {}", engine.searched_nodes());
+                    println!(
+                        "info depth {depth} score cp {score} nodes {} hashfull 0 string deterministic_multithread={} max_threads={} granularity={} hash_mb={}",
+                        engine.searched_nodes(),
+                        settings.deterministic_multithread,
+                        settings.max_threads,
+                        settings.granularity,
+                        settings.hash_mb
+                    );
                     println!("bestmove {}", chess_move.to_uci());
                 }
                 None => {
@@ -65,16 +77,56 @@ pub fn run() {
 }
 
 fn handle_setoption(rest: &str, engine: &mut Engine) {
-    let tokens: Vec<&str> = rest.split_whitespace().collect();
-    if tokens.len() >= 4
-        && tokens[0].eq_ignore_ascii_case("name")
-        && tokens[1].eq_ignore_ascii_case("Depth")
-        && tokens[2].eq_ignore_ascii_case("value")
-    {
-        if let Ok(depth) = tokens[3].parse::<u8>() {
-            engine.set_depth(depth.clamp(1, 8));
+    let Some((name, value)) = parse_setoption_name_value(rest) else {
+        return;
+    };
+    match normalize_option_name(&name).as_str() {
+        "depth" => {
+            if let Ok(depth) = value.parse::<u8>() {
+                engine.set_depth(depth.clamp(1, 8));
+            }
         }
+        "deterministic_multithread" => {
+            let enabled = matches!(value.to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "on");
+            engine.set_deterministic_multithread(enabled);
+        }
+        "max_threads" | "threads" => {
+            if let Ok(threads) = value.parse::<usize>() {
+                engine.set_max_threads(threads);
+            }
+        }
+        "granularity" => {
+            if let Ok(granularity) = value.parse::<usize>() {
+                engine.set_granularity(granularity);
+            }
+        }
+        "hash" | "hash_mb" => {
+            if let Ok(hash_mb) = value.parse::<usize>() {
+                engine.set_hash_mb(hash_mb);
+            }
+        }
+        _ => {}
     }
+}
+
+fn parse_setoption_name_value(rest: &str) -> Option<(String, String)> {
+    let tokens: Vec<&str> = rest.split_whitespace().collect();
+    if tokens.len() < 4 || !tokens[0].eq_ignore_ascii_case("name") {
+        return None;
+    }
+    let value_index = tokens.iter().position(|token| token.eq_ignore_ascii_case("value"))?;
+    if value_index <= 1 || value_index + 1 >= tokens.len() {
+        return None;
+    }
+    let name = tokens[1..value_index].join(" ");
+    let value = tokens[value_index + 1..].join(" ");
+    Some((name, value))
+}
+
+fn normalize_option_name(name: &str) -> String {
+    name.trim()
+        .to_ascii_lowercase()
+        .replace([' ', '-'], "_")
 }
 
 fn parse_go_depth(rest: &str) -> Option<u8> {
@@ -139,5 +191,19 @@ mod tests {
     fn parses_fen() {
         let position = parse_position_command(&format!("fen {STARTPOS_FEN}")).unwrap();
         assert_eq!(position.to_fen(), STARTPOS_FEN);
+    }
+
+    #[test]
+    fn parses_resource_setoptions() {
+        let mut engine = Engine::new(4);
+        handle_setoption("name deterministic_multithread value true", &mut engine);
+        handle_setoption("name max_threads value 4", &mut engine);
+        handle_setoption("name granularity value 2", &mut engine);
+        handle_setoption("name Hash value 8", &mut engine);
+        let settings = engine.settings();
+        assert!(settings.deterministic_multithread);
+        assert_eq!(settings.max_threads, 4);
+        assert_eq!(settings.granularity, 2);
+        assert_eq!(settings.hash_mb, 8);
     }
 }

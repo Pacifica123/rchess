@@ -234,13 +234,17 @@ The evaluation bar is drawn next to the board. It uses, in order:
 
 Positive values are shown from White's perspective. This makes analysis navigation, finished games and engine-vs-engine games easier to inspect without adding a full analysis dashboard yet.
 
-## Planned resource settings
+## Search resource settings
 
-The `Engine backend` section now contains GUI-only placeholders for future performance settings:
+The `Engine backend` section now contains active settings for the internal `rchess` backend:
 
 ```text
-CPU threads target
-Hash target MB
+deterministic_multithread
+max_threads
+granularity
+Hash MB
 ```
 
-They are deliberately not sent to UCI and do not affect search yet. The current engine is still single-threaded and has no transposition table. The controls exist to reserve UX space for future parallel search and memory-heavy search structures.
+For internal `rchess`, the GUI sends these as UCI `setoption` commands before search. `deterministic_multithread` enables fixed-order root-splitting. `max_threads` limits worker count. `granularity` controls how many root moves go into one work chunk. `Hash MB` controls the shared atomic transposition table size.
+
+External UCI engines are intentionally not configured by these project-specific options yet. That keeps the first implementation focused on our own engine and avoids pretending that all UCI engines expose the same knobs.

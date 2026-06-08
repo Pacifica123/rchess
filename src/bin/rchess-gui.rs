@@ -80,7 +80,9 @@ struct RChessGui {
     engine_log: Vec<String>,
     last_engine_info: String,
     last_engine_score_cp: Option<i32>,
+    deterministic_multithread: bool,
     planned_threads: u16,
+    search_granularity: u16,
     planned_hash_mb: u32,
     resource_settings_status: String,
     match_white_path: String,
@@ -156,9 +158,11 @@ impl RChessGui {
             engine_log: Vec::new(),
             last_engine_info: String::new(),
             last_engine_score_cp: None,
+            deterministic_multithread: false,
             planned_threads: 1,
+            search_granularity: 1,
             planned_hash_mb: 64,
-            resource_settings_status: "Resource controls are placeholders; current search remains single-threaded".to_string(),
+            resource_settings_status: "Internal rchess resource settings are applied to the UCI child before search; external engines are not configured by these project-specific options".to_string(),
             match_white_path: String::new(),
             match_black_path: String::new(),
             match_depth: 3,
@@ -537,6 +541,7 @@ impl RChessGui {
                     label: EngineBackend::RChess.label().to_string(),
                     program: current,
                     args: vec!["--engine-mode".to_string()],
+                    is_internal_rchess: true,
                 })
             }
             EngineBackend::Stockfish10 => {
@@ -549,6 +554,7 @@ impl RChessGui {
                     label: EngineBackend::Stockfish10.label().to_string(),
                     program: PathBuf::from(path),
                     args: Vec::new(),
+                    is_internal_rchess: false,
                 })
             }
             EngineBackend::CustomUci => {
@@ -561,6 +567,7 @@ impl RChessGui {
                     label: EngineBackend::CustomUci.label().to_string(),
                     program: PathBuf::from(path),
                     args: Vec::new(),
+                    is_internal_rchess: false,
                 })
             }
         }
@@ -579,6 +586,7 @@ impl RChessGui {
             return;
         }
 
+        self.send_primary_engine_resource_options();
         self.pending_engine = true;
         self.engine_status = format!("Engine is thinking at depth {}", self.search_depth);
         self.send_to_engine(&format!("position fen {}", self.position.to_fen()));
@@ -592,7 +600,17 @@ impl RChessGui {
 
         let command = self.current_engine_command()?;
         let label = command.label.clone();
-        let (engine, rx) = UciEngine::spawn(command)?;
+        let is_internal_rchess = command.is_internal_rchess;
+        let (mut engine, rx) = UciEngine::spawn(command)?;
+        if is_internal_rchess {
+            let _ = send_rchess_resource_options(
+                &mut engine,
+                self.deterministic_multithread,
+                self.planned_threads,
+                self.search_granularity,
+                self.planned_hash_mb,
+            );
+        }
         self.engine = Some(engine);
         self.engine_rx = Some(rx);
         self.send_to_engine("uci");
@@ -608,6 +626,33 @@ impl RChessGui {
                 self.engine = None;
                 self.engine_rx = None;
                 self.pending_engine = false;
+            }
+        }
+    }
+
+    fn send_primary_engine_resource_options(&mut self) {
+        if self.engine_backend != EngineBackend::RChess {
+            self.resource_settings_status = "Resource settings are only applied to the internal rchess backend for now".to_string();
+            return;
+        }
+        let Some(engine) = &mut self.engine else {
+            return;
+        };
+        match send_rchess_resource_options(
+            engine,
+            self.deterministic_multithread,
+            self.planned_threads,
+            self.search_granularity,
+            self.planned_hash_mb,
+        ) {
+            Ok(()) => {
+                self.resource_settings_status = format!(
+                    "Applied to internal rchess: deterministic_multithread={}, max_threads={}, granularity={}, Hash={} MB",
+                    self.deterministic_multithread, self.planned_threads, self.search_granularity, self.planned_hash_mb
+                );
+            }
+            Err(error) => {
+                self.resource_settings_status = format!("Resource option write error: {error}");
             }
         }
     }
@@ -707,6 +752,8 @@ impl RChessGui {
         let limit = SearchLimit::depth_or_movetime(self.match_depth, self.match_movetime_ms);
         let white_name = white_command.label.clone();
         let black_name = black_command.label.clone();
+        let white_is_internal_rchess = white_command.is_internal_rchess;
+        let black_is_internal_rchess = black_command.is_internal_rchess;
         let white_slot = UciEngineSlot::new(white_name.clone(), white_command.program.to_string_lossy().to_string())
             .with_args(white_command.args.clone())
             .with_limit(limit.clone());
@@ -723,20 +770,39 @@ impl RChessGui {
             }
         };
 
-        let (white_engine, white_rx) = match UciEngine::spawn(white_command) {
+        let (mut white_engine, white_rx) = match UciEngine::spawn(white_command) {
             Ok(value) => value,
             Err(error) => {
                 self.match_status = format!("White engine start error: {error}");
                 return;
             }
         };
-        let (black_engine, black_rx) = match UciEngine::spawn(black_command) {
+        let (mut black_engine, black_rx) = match UciEngine::spawn(black_command) {
             Ok(value) => value,
             Err(error) => {
                 self.match_status = format!("Black engine start error: {error}");
                 return;
             }
         };
+
+        if white_is_internal_rchess {
+            let _ = send_rchess_resource_options(
+                &mut white_engine,
+                self.deterministic_multithread,
+                self.planned_threads,
+                self.search_granularity,
+                self.planned_hash_mb,
+            );
+        }
+        if black_is_internal_rchess {
+            let _ = send_rchess_resource_options(
+                &mut black_engine,
+                self.deterministic_multithread,
+                self.planned_threads,
+                self.search_granularity,
+                self.planned_hash_mb,
+            );
+        }
 
         self.game_start_fen = start_fen;
         self.played_moves.clear();
@@ -769,6 +835,7 @@ impl RChessGui {
                 label: format!("rchess {color_label}"),
                 program: current,
                 args: vec!["--engine-mode".to_string()],
+                is_internal_rchess: true,
             })
         } else {
             validate_executable_path(&normalized, color_label)?;
@@ -778,7 +845,7 @@ impl RChessGui {
                 .and_then(|value| value.to_str())
                 .map(|value| format!("{color_label} {value}"))
                 .unwrap_or_else(|| format!("{color_label} UCI"));
-            Ok(UciCommand { label, program, args: Vec::new() })
+            Ok(UciCommand { label, program, args: Vec::new(), is_internal_rchess: false })
         }
     }
 
@@ -1000,13 +1067,24 @@ impl RChessGui {
             }
         };
         let label = command.label.clone();
-        let (engine, rx) = match UciEngine::spawn(command) {
+        let is_internal_rchess = command.is_internal_rchess;
+        let (mut engine, rx) = match UciEngine::spawn(command) {
             Ok(value) => value,
             Err(error) => {
                 self.analysis_status = format!("Analysis engine start error: {error}");
                 return;
             }
         };
+
+        if is_internal_rchess {
+            let _ = send_rchess_resource_options(
+                &mut engine,
+                self.deterministic_multithread,
+                self.planned_threads,
+                self.search_granularity,
+                self.planned_hash_mb,
+            );
+        }
 
         self.analysis = Some(analysis);
         self.analysis_jobs = jobs;
@@ -1446,7 +1524,7 @@ impl RChessGui {
                         self.stop_engine("UCI child stopped");
                     }
                     ui.separator();
-                    ui.label("Backend and planned CPU/RAM placeholders are configured in the right panel.");
+                    ui.label("Backend and deterministic resource settings are configured in the right panel.");
                 });
 
                 ui.menu_button("Match", |ui| {
@@ -1741,18 +1819,17 @@ impl RChessGui {
 
     fn show_engine_resource_settings(&mut self, ui: &mut egui::Ui) {
         ui.separator();
-        ui.heading("Resource settings, planned");
-        ui.label("These controls are intentionally GUI-only for now. The current rchess search stays single-threaded and does not allocate a hash table yet.");
-        ui.add(egui::Slider::new(&mut self.planned_threads, 1..=32).text("CPU threads target"));
+        ui.heading("Search resources");
+        ui.label("These settings are active for the internal rchess UCI backend. They are intentionally deterministic: root moves are split in a fixed order and the shared transposition table uses atomic replace-by-depth+age entries.");
+        ui.checkbox(&mut self.deterministic_multithread, "deterministic_multithread");
+        ui.add(egui::Slider::new(&mut self.planned_threads, 1..=32).text("max_threads"));
+        ui.add(egui::Slider::new(&mut self.search_granularity, 1..=16).text("granularity"));
         ui.horizontal(|ui| {
-            ui.label("Hash target MB");
-            ui.add(egui::DragValue::new(&mut self.planned_hash_mb).range(16..=4096).speed(16.0));
+            ui.label("Hash MB");
+            ui.add(egui::DragValue::new(&mut self.planned_hash_mb).range(1..=4096).speed(16.0));
         });
-        if ui.button("Store planned resource profile").clicked() {
-            self.resource_settings_status = format!(
-                "Stored future profile only: {} thread(s), {} MB hash target. Not applied to search yet.",
-                self.planned_threads, self.planned_hash_mb
-            );
+        if ui.button("Apply to running rchess child").clicked() {
+            self.send_primary_engine_resource_options();
         }
         ui.label(&self.resource_settings_status);
     }
@@ -2191,6 +2268,7 @@ struct UciCommand {
     label: String,
     program: PathBuf,
     args: Vec<String>,
+    is_internal_rchess: bool,
 }
 
 struct UciEngine {
@@ -2253,6 +2331,23 @@ impl Drop for UciEngine {
         let _ = self.stdin.flush();
         let _ = self.child.kill();
     }
+}
+
+fn send_rchess_resource_options(
+    engine: &mut UciEngine,
+    deterministic_multithread: bool,
+    max_threads: u16,
+    granularity: u16,
+    hash_mb: u32,
+) -> std::io::Result<()> {
+    engine.send(&format!(
+        "setoption name deterministic_multithread value {}",
+        deterministic_multithread
+    ))?;
+    engine.send(&format!("setoption name max_threads value {}", max_threads.max(1)))?;
+    engine.send(&format!("setoption name granularity value {}", granularity.max(1)))?;
+    engine.send(&format!("setoption name Hash value {}", hash_mb.max(1)))?;
+    Ok(())
 }
 
 
