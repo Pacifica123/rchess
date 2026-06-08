@@ -53,3 +53,18 @@ Those should be added as separate layers after the UI and UCI pipeline stop chan
 Analysis is no longer only a table in the right panel. When a PGN is analysed, the GUI also keeps the analysed game as the current game history. Clicking a row in the analysis table moves the board's history-view cursor to that ply. The board can then be stepped with Left/Right without changing the actual move list.
 
 For each displayed ply, the evaluation bar first tries to use the corresponding analysis score. If the score is unavailable, the GUI falls back to the current deterministic static evaluation from the internal engine code. Scores are converted to White perspective before drawing the bar.
+
+## Terminal positions
+
+The GUI now treats checkmate and stalemate as terminal evaluation cases before reading ordinary centipawn scores. This matters for live display and for PGN analysis: a completed mating position must not be shown as a small material or positional advantage for the side that is already winning or losing.
+
+For the board evaluation bar, terminal score priority is:
+
+```text
+checkmate/stalemate result
+analysis score for the displayed ply
+live UCI score
+static deterministic evaluation
+```
+
+When a UCI backend returns `bestmove 0000` without a score for a terminal analysis job, the GUI falls back to a deterministic terminal/static score for that FEN. The internal rchess UCI backend also emits a `score mate -1` line when the side to move has already been checkmated.

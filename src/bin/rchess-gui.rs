@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 use rchess::analysis::{format_accuracy, format_cp, format_cp_value, AnalysisJob, GameAnalysis};
@@ -189,6 +189,9 @@ struct RChessGui {
     selected_moves: Vec<ChessMove>,
     dragging_from: Option<u8>,
     drag_pointer: Option<egui::Pos2>,
+    move_animation: Option<MoveAnimation>,
+    animate_moves: bool,
+    move_animation_ms: u32,
     promotion_request: Option<PromotionRequest>,
     played_moves: Vec<ChessMove>,
     redo_moves: Vec<ChessMove>,
@@ -267,6 +270,30 @@ struct PromotionRequest {
     options: Vec<ChessMove>,
 }
 
+#[derive(Clone)]
+struct MoveAnimation {
+    chess_move: ChessMove,
+    piece: rchess::chess::Piece,
+    start: Instant,
+    duration: Duration,
+}
+
+impl MoveAnimation {
+    fn progress(&self) -> f32 {
+        let duration = self.duration.as_secs_f32().max(0.001);
+        (self.start.elapsed().as_secs_f32() / duration).clamp(0.0, 1.0)
+    }
+
+    fn eased_progress(&self) -> f32 {
+        let t = self.progress();
+        t * t * (3.0 - 2.0 * t)
+    }
+
+    fn is_finished(&self) -> bool {
+        self.progress() >= 1.0
+    }
+}
+
 impl RChessGui {
     fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         let position = Position::startpos();
@@ -286,6 +313,9 @@ impl RChessGui {
             selected_moves: Vec::new(),
             dragging_from: None,
             drag_pointer: None,
+            move_animation: None,
+            animate_moves: true,
+            move_animation_ms: 180,
             promotion_request: None,
             played_moves: Vec::new(),
             redo_moves: Vec::new(),
@@ -370,6 +400,7 @@ impl RChessGui {
         self.selected_moves.clear();
         self.dragging_from = None;
         self.drag_pointer = None;
+        self.move_animation = None;
         self.promotion_request = None;
         self.played_moves.clear();
         self.redo_moves.clear();
@@ -398,6 +429,7 @@ impl RChessGui {
                 self.selected_moves.clear();
                 self.dragging_from = None;
                 self.drag_pointer = None;
+                self.move_animation = None;
                 self.promotion_request = None;
                 self.played_moves.clear();
                 self.redo_moves.clear();
@@ -482,6 +514,7 @@ impl RChessGui {
                 self.selected_moves.clear();
                 self.dragging_from = None;
                 self.drag_pointer = None;
+                self.move_animation = None;
                 self.promotion_request = None;
                 self.pending_engine = false;
                 self.last_engine_score_cp = None;
@@ -562,6 +595,34 @@ impl RChessGui {
         self.drag_pointer = None;
     }
 
+    fn start_move_animation(&mut self, chess_move: ChessMove) {
+        if !self.animate_moves || self.move_animation_ms == 0 || !self.is_history_view_live() {
+            self.move_animation = None;
+            return;
+        }
+        let Some(piece) = self.position.piece_at(chess_move.to) else {
+            self.move_animation = None;
+            return;
+        };
+        self.move_animation = Some(MoveAnimation {
+            chess_move,
+            piece,
+            start: Instant::now(),
+            duration: Duration::from_millis(self.move_animation_ms.clamp(30, 1200) as u64),
+        });
+    }
+
+    fn finish_move_animation_if_done(&mut self) {
+        let finished = self
+            .move_animation
+            .as_ref()
+            .map(|animation| animation.is_finished())
+            .unwrap_or(false);
+        if finished {
+            self.move_animation = None;
+        }
+    }
+
     fn should_auto_engine_move(&self) -> bool {
         self.auto_engine
             && !self.pending_engine
@@ -612,6 +673,7 @@ impl RChessGui {
         match self.position.make_legal_move(chess_move) {
             Ok(()) => {
                 self.record_applied_move(chess_move);
+                self.start_move_animation(chess_move);
                 self.clear_selection();
                 self.promotion_request = None;
                 self.refresh_game_status();
@@ -658,6 +720,7 @@ impl RChessGui {
             return;
         };
         self.redo_moves.push(chess_move);
+        self.move_animation = None;
         match self.rebuild_position_from_history() {
             Ok(()) => self.engine_status = format!("Undid {}", chess_move.to_uci()),
             Err(error) => self.engine_status = format!("Undo error: {error}"),
@@ -678,6 +741,7 @@ impl RChessGui {
                 self.played_moves.push(chess_move);
                 self.history_view_ply = None;
                 self.last_engine_score_cp = None;
+                self.start_move_animation(chess_move);
                 self.fen_input = self.position.to_fen();
                 self.clear_selection();
                 self.promotion_request = None;
@@ -879,6 +943,7 @@ impl RChessGui {
             Some(chess_move) => match self.position.make_legal_move(chess_move) {
                 Ok(()) => {
                     self.record_applied_move(chess_move);
+                    self.start_move_animation(chess_move);
                     self.engine_status = format!("Engine played {move_text}");
                     self.clear_selection();
                     self.refresh_game_status();
@@ -1145,11 +1210,16 @@ impl RChessGui {
 
         match result {
             Ok((position, moves, result)) => {
+                let last_match_move = moves.last().copied();
                 self.position = position;
                 self.played_moves = moves;
                 self.redo_moves.clear();
                 self.history_view_ply = None;
+                self.last_engine_score_cp = None;
                 self.fen_input = self.position.to_fen();
+                if let Some(chess_move) = last_match_move {
+                    self.start_move_animation(chess_move);
+                }
                 self.refresh_game_status();
                 self.update_match_pgn_text();
                 if result == "*" {
@@ -1354,7 +1424,9 @@ impl RChessGui {
         let Some(job) = self.analysis_current_job.take() else {
             return;
         };
-        let score_cp = self.analysis_last_score_cp.unwrap_or(0);
+        let score_cp = self
+            .analysis_last_score_cp
+            .unwrap_or_else(|| score_for_fen_side_to_move(&job.fen));
         if let Some(analysis) = self.analysis.as_mut() {
             analysis.set_score(&job, score_cp);
         }
@@ -1418,6 +1490,7 @@ impl RChessGui {
         let clamped = ply.min(total);
         self.history_view_ply = if clamped == total { None } else { Some(clamped) };
         self.clear_selection();
+        self.move_animation = None;
         self.promotion_request = None;
         self.engine_status = self.history_view_label();
     }
@@ -1476,6 +1549,10 @@ impl RChessGui {
     }
 
     fn display_eval_cp_white(&self, display_position: &Position) -> i32 {
+        if let Some(score) = terminal_score_white(display_position) {
+            return score;
+        }
+
         let ply = self.history_view_ply();
         if let Some(score) = self.analysis_score_for_ply_white(ply) {
             return score;
@@ -2019,6 +2096,8 @@ impl RChessGui {
                 ui.selectable_value(&mut self.piece_preset, PiecePreset::Custom, PiecePreset::Custom.label());
             });
         ui.add(egui::Slider::new(&mut self.piece_scale, 0.45..=0.95).text("Piece scale"));
+        ui.checkbox(&mut self.animate_moves, "Animate moves");
+        ui.add(egui::Slider::new(&mut self.move_animation_ms, 30..=800).text("Move animation ms"));
         color_row(ui, "White pieces", &mut self.white_piece_color);
         color_row(ui, "Black pieces", &mut self.black_piece_color);
         color_row(ui, "Piece shadow", &mut self.piece_shadow_color);
@@ -2396,7 +2475,7 @@ impl RChessGui {
         ui.allocate_ui_at_rect(footer_rect, |ui| {
             ui.set_clip_rect(footer_rect);
             ui.horizontal_wrapped(|ui| {
-                ui.monospace(format!("{} | eval {}", self.history_view_label(), format_cp_value(eval_cp)));
+                ui.monospace(format!("{} | eval {}", self.history_view_label(), format_eval_cp_value(eval_cp)));
                 if !self.is_history_view_live() && ui.button("Return live").clicked() {
                     self.history_to_live();
                 }
@@ -2431,7 +2510,7 @@ impl RChessGui {
         painter.text(
             rect.center_bottom() + egui::vec2(0.0, 18.0),
             egui::Align2::CENTER_CENTER,
-            format_cp_value(score_cp),
+            format_eval_cp_value(score_cp),
             egui::FontId::monospace(12.0),
             egui::Color32::from_rgb(190, 190, 190),
         );
@@ -2501,7 +2580,7 @@ impl RChessGui {
 
             ui.add_space(8.0);
             ui.horizontal_wrapped(|ui| {
-                ui.monospace(format!("{} | eval {}", self.history_view_label(), format_cp_value(eval_cp)));
+                ui.monospace(format!("{} | eval {}", self.history_view_label(), format_eval_cp_value(eval_cp)));
                 if !self.is_history_view_live() && ui.button("Return live").clicked() {
                     self.history_to_live();
                 }
@@ -2536,7 +2615,7 @@ impl RChessGui {
                 egui::StrokeKind::Outside,
             );
             ui.add_space(4.0);
-            ui.monospace(format_cp_value(score_cp));
+            ui.monospace(format_eval_cp_value(score_cp));
         });
     }
 
@@ -2550,6 +2629,11 @@ impl RChessGui {
             Vec::new()
         };
         let check_square = self.checked_king_square(display_position);
+        let active_animation = self
+            .move_animation
+            .as_ref()
+            .filter(|animation| self.is_history_view_live() && !animation.is_finished());
+        let animated_to = active_animation.map(|animation| animation.chess_move.to);
         let drag_target = self
             .drag_pointer
             .and_then(|pointer| pointer_to_square(rect, pointer, self.flipped));
@@ -2597,7 +2681,7 @@ impl RChessGui {
                     }
                 }
 
-                if self.dragging_from != Some(square) {
+                if self.dragging_from != Some(square) && animated_to != Some(square) {
                     if let Some(piece) = display_position.piece_at(square) {
                         self.paint_piece(&painter, piece, square_rect.center(), square_size);
                     }
@@ -2613,6 +2697,18 @@ impl RChessGui {
             egui::Stroke::new(1.0, egui::Color32::from_rgb(40, 40, 40)),
             egui::StrokeKind::Outside,
         );
+
+        if let Some(animation) = active_animation {
+            let from = square_center(rect, animation.chess_move.from, self.flipped);
+            let to = square_center(rect, animation.chess_move.to, self.flipped);
+            let center = interpolate_pos(from, to, animation.eased_progress());
+            painter.circle_filled(
+                center,
+                square_size * 0.44,
+                egui::Color32::from_rgba_premultiplied(245, 235, 210, 36),
+            );
+            self.paint_piece(&painter, animation.piece, center, square_size);
+        }
 
         if let (Some(from), Some(pointer)) = (self.dragging_from, self.drag_pointer) {
             if let Some(piece) = display_position.piece_at(from) {
@@ -2720,6 +2816,7 @@ impl eframe::App for RChessGui {
         self.poll_engine();
         self.poll_match_engines();
         self.poll_analysis_engine();
+        self.finish_move_animation_if_done();
         self.handle_history_keyboard(ui.ctx());
 
         self.show_top_panel(ui);
@@ -2803,6 +2900,9 @@ impl eframe::App for RChessGui {
 
         self.show_promotion_dialog(ui.ctx());
 
+        if self.move_animation.is_some() {
+            ui.ctx().request_repaint_after(Duration::from_millis(16));
+        }
         if self.pending_engine || self.match_running || self.analysis_running {
             ui.ctx().request_repaint_after(Duration::from_millis(80));
         }
@@ -3035,10 +3135,64 @@ fn view_square(row: usize, col: usize, flipped: bool) -> u8 {
     rank * 8 + file
 }
 
+fn square_center(rect: egui::Rect, square: u8, flipped: bool) -> egui::Pos2 {
+    let rank = square / 8;
+    let file = square % 8;
+    let (row, col) = if flipped {
+        (rank, 7 - file)
+    } else {
+        (7 - rank, file)
+    };
+    let square_size = rect.width() / 8.0;
+    egui::pos2(
+        rect.left() + (col as f32 + 0.5) * square_size,
+        rect.top() + (row as f32 + 0.5) * square_size,
+    )
+}
+
+fn interpolate_pos(from: egui::Pos2, to: egui::Pos2, t: f32) -> egui::Pos2 {
+    from + (to - from) * t.clamp(0.0, 1.0)
+}
+
 fn color_name(color: Color) -> &'static str {
     match color {
         Color::White => "White",
         Color::Black => "Black",
+    }
+}
+
+const GUI_MATE_SCORE_CP: i32 = 32_000;
+
+fn terminal_score_white(position: &Position) -> Option<i32> {
+    if position.is_checkmate() {
+        Some(match position.side_to_move() {
+            Color::White => -GUI_MATE_SCORE_CP,
+            Color::Black => GUI_MATE_SCORE_CP,
+        })
+    } else if position.is_stalemate() {
+        Some(0)
+    } else {
+        None
+    }
+}
+
+fn terminal_score_side_to_move(position: &Position) -> Option<i32> {
+    if position.is_checkmate() {
+        Some(-GUI_MATE_SCORE_CP)
+    } else if position.is_stalemate() {
+        Some(0)
+    } else {
+        None
+    }
+}
+
+fn format_eval_cp_value(score: i32) -> String {
+    if score >= GUI_MATE_SCORE_CP / 2 {
+        "# White".to_string()
+    } else if score <= -GUI_MATE_SCORE_CP / 2 {
+        "# Black".to_string()
+    } else {
+        format_cp_value(score)
     }
 }
 
@@ -3056,6 +3210,13 @@ fn score_from_fen_side_to_move_to_white(fen: &str, score_cp: i32) -> i32 {
     }
 }
 
+fn score_for_fen_side_to_move(fen: &str) -> i32 {
+    match Position::from_fen(fen) {
+        Ok(position) => terminal_score_side_to_move(&position)
+            .unwrap_or_else(|| evaluate_for_side_to_move(&position)),
+        Err(_) => 0,
+    }
+}
 
 fn start_fullmove_number(fen: &str) -> u32 {
     fen.split_whitespace()

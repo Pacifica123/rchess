@@ -56,7 +56,11 @@ pub fn run() {
                     println!("bestmove {}", chess_move.to_uci());
                 }
                 None => {
-                    println!("info depth {depth} score cp 0 nodes {}", engine.searched_nodes());
+                    if position.is_checkmate() {
+                        println!("info depth {depth} score mate -1 nodes {} string terminal checkmate", engine.searched_nodes());
+                    } else {
+                        println!("info depth {depth} score cp 0 nodes {} string terminal stalemate-or-no-move", engine.searched_nodes());
+                    }
                     println!("bestmove 0000");
                 }
             }

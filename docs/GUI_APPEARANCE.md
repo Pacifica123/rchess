@@ -97,3 +97,18 @@ left controls | eval bar + board | workspace
 The board is now drawn in a fixed center viewport. The side panels may scroll internally, but they must not be allowed to resize the board out of the visible area. The evaluation bar belongs to the same center viewport as the board.
 
 This is intentional: visual customization is allowed to change colors and glyphs, not the basic visibility contract of the board.
+
+## Move animation and terminal evaluation
+
+The board now has a small optional animation layer for the last applied move. It is intentionally simple: after a legal move is already accepted by the core, the GUI draws the moved piece between the source and target squares for a short fixed duration. This keeps the chess state deterministic and avoids making animation part of the rules layer.
+
+The `Board appearance` panel contains:
+
+```text
+Animate moves
+Move animation ms
+```
+
+The animation is a visual overlay only. PGN, FEN, engine search and history navigation still use the already-applied board state. Moving the history cursor cancels the animation.
+
+The evaluation bar now checks terminal positions before using analysis scores, live UCI scores or static evaluation. A checkmated side is displayed as a decisive result for the winner, so a board where Black is checkmated is shown as winning for White even if the last non-terminal search score was stale.

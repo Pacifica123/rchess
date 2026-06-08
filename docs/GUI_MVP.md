@@ -270,3 +270,9 @@ This is not yet an SVG/PNG asset pipeline. That can be added later without touch
 GUI уже содержит много инструментов: PGN, анализ, engine backends, engine-vs-engine, UCI logs и appearance-настройки. Из-за этого доска должна считаться главным закреплённым виджетом, а не обычным элементом потока. Текущий layout выделяет под неё отдельную центральную колонку; боковые панели обязаны скроллиться внутри себя и не должны сжимать доску до исчезновения.
 
 Шкала оценки является частью центральной колонки и должна оставаться рядом с доской при следующих изменениях интерфейса.
+
+## Terminal eval and move animation
+
+The evaluation bar now handles terminal positions before using ordinary analysis or static scores. Checkmate is shown as a decisive score for the winning side; stalemate is shown as equal. This prevents stale UCI output or static material evaluation from showing an advantage for the wrong side after the game is already over.
+
+The board also has an optional last-move animation. It does not delay or modify move application in the core. The legal move is applied first, then the GUI temporarily hides the destination piece and draws it moving from the source square to the destination square. The animation is cancelled when the user browses history, starts a new game, loads FEN or loads PGN.
