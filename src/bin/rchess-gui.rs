@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use eframe::egui;
 use rchess::chess::{ChessMove, Color, PieceKind, Position, STARTPOS_FEN};
+use rchess::pgn::{export_pgn, parse_pgn, position_after_moves};
 
 fn main() -> eframe::Result<()> {
     if env::args().any(|arg| arg == "--engine-mode") {
@@ -29,9 +30,11 @@ fn main() -> eframe::Result<()> {
 struct RChessGui {
     position: Position,
     fen_input: String,
+    game_start_fen: String,
+    pgn_text: String,
     selected: Option<u8>,
     selected_moves: Vec<ChessMove>,
-    played_moves: Vec<String>,
+    played_moves: Vec<ChessMove>,
     player_color: Color,
     auto_engine: bool,
     flipped: bool,
@@ -50,6 +53,8 @@ impl RChessGui {
         let position = Position::startpos();
         let mut app = Self {
             fen_input: STARTPOS_FEN.to_string(),
+            game_start_fen: STARTPOS_FEN.to_string(),
+            pgn_text: String::new(),
             position,
             selected: None,
             selected_moves: Vec::new(),
@@ -73,9 +78,11 @@ impl RChessGui {
     fn new_game(&mut self) {
         self.position = Position::startpos();
         self.fen_input = STARTPOS_FEN.to_string();
+        self.game_start_fen = STARTPOS_FEN.to_string();
         self.selected = None;
         self.selected_moves.clear();
         self.played_moves.clear();
+        self.pgn_text.clear();
         self.pending_engine = false;
         self.engine_status = "New game".to_string();
         self.send_to_engine("ucinewgame");
@@ -90,6 +97,8 @@ impl RChessGui {
         match Position::from_fen(self.fen_input.trim()) {
             Ok(position) => {
                 self.position = position;
+                self.game_start_fen = self.position.to_fen();
+                self.pgn_text.clear();
                 self.selected = None;
                 self.selected_moves.clear();
                 self.played_moves.clear();
@@ -100,6 +109,58 @@ impl RChessGui {
             Err(error) => {
                 self.engine_status = format!("FEN error: {error}");
             }
+        }
+    }
+
+    fn export_pgn_to_text(&mut self) {
+        let result = self.current_result();
+        match export_pgn(&self.game_start_fen, &self.played_moves, &result) {
+            Ok(text) => {
+                self.pgn_text = text;
+                self.engine_status = "PGN exported".to_string();
+            }
+            Err(error) => {
+                self.engine_status = format!("PGN export error: {error}");
+            }
+        }
+    }
+
+    fn load_pgn_from_text(&mut self) {
+        match parse_pgn(&self.pgn_text).and_then(|game| {
+            let position = position_after_moves(&game.start_fen, &game.moves)?;
+            Ok((game, position))
+        }) {
+            Ok((game, position)) => {
+                self.game_start_fen = game.start_fen;
+                self.played_moves = game.moves;
+                self.position = position;
+                self.fen_input = self.position.to_fen();
+                self.selected = None;
+                self.selected_moves.clear();
+                self.pending_engine = false;
+                self.engine_status = format!("PGN loaded, result {}", game.result);
+                self.refresh_game_status();
+
+                if self.should_auto_engine_move() {
+                    self.request_engine_move();
+                }
+            }
+            Err(error) => {
+                self.engine_status = format!("PGN error: {error}");
+            }
+        }
+    }
+
+    fn current_result(&self) -> String {
+        if self.position.is_checkmate() {
+            match self.position.side_to_move() {
+                Color::White => "0-1".to_string(),
+                Color::Black => "1-0".to_string(),
+            }
+        } else if self.position.is_stalemate() {
+            "1/2-1/2".to_string()
+        } else {
+            "*".to_string()
         }
     }
 
@@ -165,10 +226,9 @@ impl RChessGui {
     }
 
     fn apply_user_move(&mut self, chess_move: ChessMove) {
-        let move_text = chess_move.to_uci();
         match self.position.make_legal_move(chess_move) {
             Ok(()) => {
-                self.played_moves.push(move_text);
+                self.played_moves.push(chess_move);
                 self.fen_input = self.position.to_fen();
                 self.clear_selection();
                 self.refresh_game_status();
@@ -270,7 +330,7 @@ impl RChessGui {
         match self.position.parse_uci_move(move_text) {
             Some(chess_move) => match self.position.make_legal_move(chess_move) {
                 Ok(()) => {
-                    self.played_moves.push(move_text.to_string());
+                    self.played_moves.push(chess_move);
                     self.fen_input = self.position.to_fen();
                     self.engine_status = format!("Engine played {move_text}");
                     self.clear_selection();
@@ -355,6 +415,30 @@ impl RChessGui {
                 });
 
                 ui.separator();
+                ui.heading("PGN");
+                ui.horizontal(|ui| {
+                    if ui.button("Export PGN").clicked() {
+                        self.export_pgn_to_text();
+                    }
+                    if ui.button("Load PGN").clicked() {
+                        self.load_pgn_from_text();
+                    }
+                    if ui.button("Clear PGN").clicked() {
+                        self.pgn_text.clear();
+                    }
+                });
+                egui::ScrollArea::vertical()
+                    .id_salt("pgn_text_scroll")
+                    .max_height(150.0)
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::TextEdit::multiline(&mut self.pgn_text)
+                                .font(egui::TextStyle::Monospace)
+                                .desired_rows(7),
+                        );
+                    });
+
+                ui.separator();
                 ui.label("External engine path. Leave empty to run this GUI binary as a UCI child process.");
                 ui.text_edit_singleline(&mut self.engine_path);
                 if ui.button("Restart UCI child").clicked() {
@@ -374,8 +458,8 @@ impl RChessGui {
                     .max_height(140.0)
                     .show(ui, |ui| {
                         for (index, pair) in self.played_moves.chunks(2).enumerate() {
-                            let white_move = pair.first().map(String::as_str).unwrap_or("");
-                            let black_move = pair.get(1).map(String::as_str).unwrap_or("");
+                            let white_move = pair.first().map(|chess_move| chess_move.to_uci()).unwrap_or_default();
+                            let black_move = pair.get(1).map(|chess_move| chess_move.to_uci()).unwrap_or_default();
                             ui.monospace(format!("{}. {:<6} {}", index + 1, white_move, black_move));
                         }
                     });

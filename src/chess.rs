@@ -916,10 +916,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn startpos_perft_depth_1_and_2() {
+    fn startpos_perft_depth_1_to_3() {
         let position = Position::startpos();
         assert_eq!(position.perft(1), 20);
         assert_eq!(position.perft(2), 400);
+        assert_eq!(position.perft(3), 8902);
     }
 
     #[test]
@@ -935,4 +936,61 @@ mod tests {
         position.make_legal_move(chess_move).unwrap();
         assert_eq!(position.to_fen(), "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1");
     }
+
+    #[test]
+    fn known_perft_positions_depth_2() {
+        let cases = [
+            ("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1", 48, 2039),
+            ("8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1", 14, 191),
+            ("rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8", 44, 1486),
+            ("r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10", 46, 2079),
+        ];
+        for (fen, depth_1, depth_2) in cases {
+            let position = Position::from_fen(fen).unwrap();
+            assert_eq!(position.perft(1), depth_1, "depth 1 failed for {fen}");
+            assert_eq!(position.perft(2), depth_2, "depth 2 failed for {fen}");
+        }
+    }
+
+    #[test]
+    fn castling_moves_king_and_rook_and_drops_rights() {
+        let mut position = Position::from_fen("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1").unwrap();
+        let chess_move = position.parse_uci_move("e1g1").unwrap();
+        position.make_legal_move(chess_move).unwrap();
+        assert_eq!(position.to_fen(), "r3k2r/8/8/8/8/8/8/R4RK1 b kq - 1 1");
+    }
+
+    #[test]
+    fn castling_through_attacked_square_is_illegal() {
+        let position = Position::from_fen("r3k2r/8/8/8/8/8/5r2/R3K2R w KQkq - 0 1").unwrap();
+        assert!(position.parse_uci_move("e1g1").is_none());
+    }
+
+    #[test]
+    fn en_passant_removes_captured_pawn() {
+        let mut position = Position::from_fen("rnbqkbnr/pp2pppp/8/2ppP3/8/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 3").unwrap();
+        let chess_move = position.parse_uci_move("e5d6").unwrap();
+        position.make_legal_move(chess_move).unwrap();
+        assert_eq!(position.to_fen(), "rnbqkbnr/pp2pppp/3P4/2p5/8/8/PPPP1PPP/RNBQKBNR b KQkq - 0 3");
+    }
+
+    #[test]
+    fn promotion_replaces_pawn_with_selected_piece() {
+        let mut position = Position::from_fen("4k3/P7/8/8/8/8/8/4K3 w - - 0 1").unwrap();
+        let chess_move = position.parse_uci_move("a7a8q").unwrap();
+        position.make_legal_move(chess_move).unwrap();
+        assert_eq!(position.to_fen(), "Q3k3/8/8/8/8/8/8/4K3 b - - 0 1");
+    }
+
+    #[test]
+    fn detects_checkmate_and_stalemate() {
+        let checkmate = Position::from_fen("rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3").unwrap();
+        assert!(checkmate.is_checkmate());
+        assert!(!checkmate.is_stalemate());
+
+        let stalemate = Position::from_fen("7k/5Q2/7K/8/8/8/8/8 b - - 0 1").unwrap();
+        assert!(stalemate.is_stalemate());
+        assert!(!stalemate.is_checkmate());
+    }
+
 }
