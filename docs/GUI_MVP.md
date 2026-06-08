@@ -47,7 +47,7 @@ GUI process  <->  stdin/stdout  <->  UCI engine process
 
 - Отдельный бинарник `rchess-gui`.
 - Окно на `egui/eframe`.
-- Доска 8x8 с Unicode-фигурами.
+- Доска 8x8 с ручной отрисовкой через `egui::Painter`.
 - Выбор фигуры кликом.
 - Реальный drag-and-drop для хода фигур: фигура скрывается на исходной клетке, следует за курсором и применяется при отпускании над целевой клеткой.
 - Подсветка выбранной фигуры.
@@ -64,6 +64,9 @@ GUI process  <->  stdin/stdout  <->  UCI engine process
 - Прокрутка партии без удаления хвоста: кнопки `|<`, `<`, `>`, `>|` и клавиши Left/Right/Home/End.
 - `Undo` / `Redo` через пересборку позиции из истории ходов.
 - Панель legal moves для просматриваемой позиции: SAN + UCI.
+- Стабильная центральная компоновка: доска и шкала оценки больше не вытесняются разросшимися боковыми панелями.
+- Секция `Board appearance`: цвета клеток, подсветок, координат и фигур.
+- Встроенные пресеты фигур и пользовательский glyph preset из текстового поля или файла.
 - Компактный вывод последней строки UCI `info`.
 - Окно выбора promotion-фигуры.
 - PGN-блок для импорта, экспорта и копирования партии через текстовое поле.
@@ -81,7 +84,7 @@ GUI process  <->  stdin/stdout  <->  UCI engine process
 - Полная таблица анализа principal variation.
 - Полноценный engine-grade виджет оценки с PV, depth и несколькими линиями.
 - Настройки характера игры.
-- Темы оформления.
+- Asset-based SVG/PNG темы фигур. Сейчас пользовательский пресет — это glyph-набор.
 
 Эти вещи лучше добавлять после того, как минимальная связь `GUI <-> UCI <-> engine` будет стабильной.
 
@@ -196,11 +199,11 @@ Custom UCI executable
 
 ## Layout pass: menu + left panel
 
-The GUI now splits controls into three zones:
+The GUI now splits controls into three zones and keeps the board as the central zone:
 
-- top menu: `File`, `Game`, `Engine`, `Match`, `Analysis`;
+- top menu: `File`, `Game`, `View`, `Engine`, `Match`, `Analysis`;
 - left panel: common board controls, FEN and legal moves;
-- right workspace: PGN text, backend setup, engine-vs-engine, game analysis, move history and logs.
+- right workspace: PGN text, board appearance, backend setup, engine-vs-engine, game analysis, move history and logs.
 
 This is not a final UX. It is a cleanup pass that prevents the right panel from becoming a dump of unrelated controls.
 
@@ -248,3 +251,16 @@ Hash MB
 For internal `rchess`, the GUI sends these as UCI `setoption` commands before search. `deterministic_multithread` enables fixed-order root-splitting. `max_threads` limits worker count. `granularity` controls how many root moves go into one work chunk. `Hash MB` controls the shared atomic transposition table size.
 
 External UCI engines are intentionally not configured by these project-specific options yet. That keeps the first implementation focused on our own engine and avoids pretending that all UCI engines expose the same knobs.
+
+
+## Board appearance
+
+The right workspace now has a `Board appearance` section. It can change square colors, legal-move markers, check/selected/drag colors, coordinate colors, piece colors, piece shadow and piece scale.
+
+Piece rendering is still glyph-based. Built-in presets are `Standard Unicode`, `Filled Unicode` and `Letter pieces`. A custom preset can be loaded from text or from a file. The format is deliberately simple and deterministic:
+
+```text
+WK WQ WR WB WN WP BK BQ BR BB BN BP
+```
+
+This is not yet an SVG/PNG asset pipeline. That can be added later without touching the chess core.

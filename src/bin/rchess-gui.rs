@@ -50,6 +50,135 @@ impl EngineBackend {
     }
 }
 
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PiecePreset {
+    StandardUnicode,
+    FilledUnicode,
+    Letters,
+    Custom,
+}
+
+impl PiecePreset {
+    fn label(self) -> &'static str {
+        match self {
+            PiecePreset::StandardUnicode => "Standard Unicode",
+            PiecePreset::FilledUnicode => "Filled Unicode",
+            PiecePreset::Letters => "Letter pieces",
+            PiecePreset::Custom => "Custom glyph set",
+        }
+    }
+}
+
+#[derive(Clone)]
+struct PieceGlyphSet {
+    white_king: String,
+    white_queen: String,
+    white_rook: String,
+    white_bishop: String,
+    white_knight: String,
+    white_pawn: String,
+    black_king: String,
+    black_queen: String,
+    black_rook: String,
+    black_bishop: String,
+    black_knight: String,
+    black_pawn: String,
+}
+
+impl PieceGlyphSet {
+    fn standard_unicode() -> Self {
+        Self::from_tokens(["♔", "♕", "♖", "♗", "♘", "♙", "♚", "♛", "♜", "♝", "♞", "♟"])
+    }
+
+    fn filled_unicode() -> Self {
+        Self::from_tokens(["♚", "♛", "♜", "♝", "♞", "♟", "♚", "♛", "♜", "♝", "♞", "♟"])
+    }
+
+    fn letters() -> Self {
+        Self::from_tokens(["K", "Q", "R", "B", "N", "P", "k", "q", "r", "b", "n", "p"])
+    }
+
+    fn from_tokens(tokens: [&str; 12]) -> Self {
+        Self {
+            white_king: tokens[0].to_string(),
+            white_queen: tokens[1].to_string(),
+            white_rook: tokens[2].to_string(),
+            white_bishop: tokens[3].to_string(),
+            white_knight: tokens[4].to_string(),
+            white_pawn: tokens[5].to_string(),
+            black_king: tokens[6].to_string(),
+            black_queen: tokens[7].to_string(),
+            black_rook: tokens[8].to_string(),
+            black_bishop: tokens[9].to_string(),
+            black_knight: tokens[10].to_string(),
+            black_pawn: tokens[11].to_string(),
+        }
+    }
+
+    fn parse(text: &str) -> Result<Self, String> {
+        let tokens: Vec<&str> = text
+            .lines()
+            .flat_map(|line| line.split('#').next().unwrap_or("").split_whitespace())
+            .collect();
+        if tokens.len() != 12 {
+            return Err(format!(
+                "custom piece preset needs 12 whitespace-separated glyphs: WK WQ WR WB WN WP BK BQ BR BB BN BP; got {}",
+                tokens.len()
+            ));
+        }
+        Ok(Self {
+            white_king: tokens[0].to_string(),
+            white_queen: tokens[1].to_string(),
+            white_rook: tokens[2].to_string(),
+            white_bishop: tokens[3].to_string(),
+            white_knight: tokens[4].to_string(),
+            white_pawn: tokens[5].to_string(),
+            black_king: tokens[6].to_string(),
+            black_queen: tokens[7].to_string(),
+            black_rook: tokens[8].to_string(),
+            black_bishop: tokens[9].to_string(),
+            black_knight: tokens[10].to_string(),
+            black_pawn: tokens[11].to_string(),
+        })
+    }
+
+    fn to_preset_text(&self) -> String {
+        format!(
+            "{} {} {} {} {} {}\n{} {} {} {} {} {}\n",
+            self.white_king,
+            self.white_queen,
+            self.white_rook,
+            self.white_bishop,
+            self.white_knight,
+            self.white_pawn,
+            self.black_king,
+            self.black_queen,
+            self.black_rook,
+            self.black_bishop,
+            self.black_knight,
+            self.black_pawn
+        )
+    }
+
+    fn glyph(&self, piece: rchess::chess::Piece) -> &str {
+        match (piece.color, piece.kind) {
+            (Color::White, PieceKind::King) => &self.white_king,
+            (Color::White, PieceKind::Queen) => &self.white_queen,
+            (Color::White, PieceKind::Rook) => &self.white_rook,
+            (Color::White, PieceKind::Bishop) => &self.white_bishop,
+            (Color::White, PieceKind::Knight) => &self.white_knight,
+            (Color::White, PieceKind::Pawn) => &self.white_pawn,
+            (Color::Black, PieceKind::King) => &self.black_king,
+            (Color::Black, PieceKind::Queen) => &self.black_queen,
+            (Color::Black, PieceKind::Rook) => &self.black_rook,
+            (Color::Black, PieceKind::Bishop) => &self.black_bishop,
+            (Color::Black, PieceKind::Knight) => &self.black_knight,
+            (Color::Black, PieceKind::Pawn) => &self.black_pawn,
+        }
+    }
+}
+
 struct RChessGui {
     position: Position,
     fen_input: String,
@@ -110,6 +239,25 @@ struct RChessGui {
     analysis_running: bool,
     analysis_status: String,
     analysis_log: Vec<String>,
+    light_square_color: egui::Color32,
+    dark_square_color: egui::Color32,
+    selected_square_color: egui::Color32,
+    drag_target_color: egui::Color32,
+    check_square_color: egui::Color32,
+    legal_move_color: egui::Color32,
+    legal_capture_color: egui::Color32,
+    coordinate_light_color: egui::Color32,
+    coordinate_dark_color: egui::Color32,
+    white_piece_color: egui::Color32,
+    black_piece_color: egui::Color32,
+    piece_shadow_color: egui::Color32,
+    show_coordinates: bool,
+    piece_scale: f32,
+    board_style_status: String,
+    piece_preset: PiecePreset,
+    custom_piece_glyphs: PieceGlyphSet,
+    custom_piece_preset_text: String,
+    custom_piece_preset_path: String,
 }
 
 #[derive(Clone)]
@@ -188,6 +336,25 @@ impl RChessGui {
             analysis_running: false,
             analysis_status: "Analysis is idle".to_string(),
             analysis_log: Vec::new(),
+            light_square_color: egui::Color32::from_rgb(235, 220, 190),
+            dark_square_color: egui::Color32::from_rgb(125, 88, 62),
+            selected_square_color: egui::Color32::from_rgb(190, 170, 80),
+            drag_target_color: egui::Color32::from_rgb(165, 150, 95),
+            check_square_color: egui::Color32::from_rgb(175, 80, 70),
+            legal_move_color: egui::Color32::from_rgb(80, 120, 70),
+            legal_capture_color: egui::Color32::from_rgb(80, 120, 70),
+            coordinate_light_color: egui::Color32::from_rgb(100, 80, 60),
+            coordinate_dark_color: egui::Color32::from_rgb(220, 205, 180),
+            white_piece_color: egui::Color32::from_rgb(245, 245, 235),
+            black_piece_color: egui::Color32::from_rgb(15, 15, 15),
+            piece_shadow_color: egui::Color32::from_rgb(25, 25, 25),
+            show_coordinates: true,
+            piece_scale: 0.66,
+            board_style_status: "Board appearance uses the built-in wood theme".to_string(),
+            piece_preset: PiecePreset::StandardUnicode,
+            custom_piece_glyphs: PieceGlyphSet::standard_unicode(),
+            custom_piece_preset_text: PieceGlyphSet::standard_unicode().to_preset_text(),
+            custom_piece_preset_path: String::new(),
         };
         app.refresh_game_status();
         app
@@ -1466,112 +1633,130 @@ impl RChessGui {
     }
 
     fn show_top_panel(&mut self, ui: &mut egui::Ui) {
-        egui::TopBottomPanel::top("menu_panel").show_inside(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.menu_button("File", |ui| {
-                    if ui.button("New game").clicked() {
-                        self.new_game();
-                    }
-                    if ui.button("Export PGN to text").clicked() {
-                        self.export_pgn_to_text();
-                    }
-                    if ui.button("Copy PGN").clicked() {
-                        self.copy_pgn_to_clipboard(ui.ctx());
-                    }
-                    if ui.button("Load PGN from text").clicked() {
-                        self.load_pgn_from_text();
-                    }
-                    if ui.button("Open PGN path").clicked() {
-                        self.open_pgn_from_file();
-                    }
-                    if ui.button("Save PGN path").clicked() {
-                        self.save_pgn_to_file();
-                    }
-                });
-
-                ui.menu_button("Game", |ui| {
-                    if ui
-                        .add_enabled(!self.pending_engine && !self.match_running, egui::Button::new("Engine move"))
-                        .clicked()
-                    {
-                        self.request_engine_move();
-                    }
-                    if ui
-                        .add_enabled(!self.pending_engine && !self.match_running && !self.played_moves.is_empty(), egui::Button::new("Undo"))
-                        .clicked()
-                    {
-                        self.undo_move();
-                    }
-                    if ui
-                        .add_enabled(!self.pending_engine && !self.match_running && !self.redo_moves.is_empty(), egui::Button::new("Redo"))
-                        .clicked()
-                    {
-                        self.redo_move();
-                    }
-                    if ui.button("Flip board").clicked() {
-                        self.flipped = !self.flipped;
-                    }
-                });
-
-                ui.menu_button("Engine", |ui| {
-                    if ui.button("Restart UCI child").clicked() {
-                        self.stop_engine("Restarting UCI child");
-                        if let Err(error) = self.ensure_engine() {
-                            self.engine_status = error;
-                        }
-                    }
-                    if ui.button("Stop engine").clicked() {
-                        self.stop_engine("UCI child stopped");
-                    }
-                    ui.separator();
-                    ui.label("Backend and deterministic resource settings are configured in the right panel.");
-                });
-
-                ui.menu_button("Match", |ui| {
-                    if ui
-                        .add_enabled(!self.match_running && !self.pending_engine, egui::Button::new("Start engine match"))
-                        .clicked()
-                    {
-                        self.start_engine_match();
-                    }
-                    if ui
-                        .add_enabled(self.match_running, egui::Button::new("Stop engine match"))
-                        .clicked()
-                    {
-                        self.stop_engine_match("Engine match stopped");
-                    }
-                    if ui.button("Copy match PGN").clicked() {
-                        if self.match_pgn_text.trim().is_empty() {
-                            self.update_match_pgn_text();
-                        }
-                        ui.ctx().copy_text(self.match_pgn_text.clone());
-                        self.match_status = "Match PGN copied to clipboard".to_string();
-                    }
-                });
-
-                ui.menu_button("Analysis", |ui| {
-                    if ui
-                        .add_enabled(!self.analysis_running, egui::Button::new("Start PGN/game analysis"))
-                        .clicked()
-                    {
-                        self.start_game_analysis();
-                    }
-                    if ui
-                        .add_enabled(self.analysis_running, egui::Button::new("Stop analysis"))
-                        .clicked()
-                    {
-                        self.stop_analysis("Analysis stopped");
-                    }
-                    if ui.button("Copy analysis report").clicked() {
-                        self.copy_analysis_report(ui.ctx());
-                    }
-                });
-
-                ui.separator();
-                ui.label(&self.game_status);
-                ui.separator();
-                ui.label(&self.engine_status);
+        ui.horizontal_wrapped(|ui| {
+            ui.menu_button("File", |ui| {
+                if ui.button("New game").clicked() {
+                    self.new_game();
+                }
+                if ui.button("Export PGN to text").clicked() {
+                    self.export_pgn_to_text();
+                }
+                if ui.button("Copy PGN").clicked() {
+                    self.copy_pgn_to_clipboard(ui.ctx());
+                }
+                if ui.button("Load PGN from text").clicked() {
+                    self.load_pgn_from_text();
+                }
+                if ui.button("Open PGN path").clicked() {
+                    self.open_pgn_from_file();
+                }
+                if ui.button("Save PGN path").clicked() {
+                    self.save_pgn_to_file();
+                }
             });
+
+            ui.menu_button("Game", |ui| {
+                if ui
+                    .add_enabled(!self.pending_engine && !self.match_running, egui::Button::new("Engine move"))
+                    .clicked()
+                {
+                    self.request_engine_move();
+                }
+                if ui
+                    .add_enabled(!self.pending_engine && !self.match_running && !self.played_moves.is_empty(), egui::Button::new("Undo"))
+                    .clicked()
+                {
+                    self.undo_move();
+                }
+                if ui
+                    .add_enabled(!self.pending_engine && !self.match_running && !self.redo_moves.is_empty(), egui::Button::new("Redo"))
+                    .clicked()
+                {
+                    self.redo_move();
+                }
+                if ui.button("Flip board").clicked() {
+                    self.flipped = !self.flipped;
+                }
+            });
+
+            ui.menu_button("View", |ui| {
+                if ui.button("Restore default board theme").clicked() {
+                    self.restore_default_board_theme();
+                }
+                if ui.button("Use standard Unicode pieces").clicked() {
+                    self.piece_preset = PiecePreset::StandardUnicode;
+                    self.board_style_status = "Using standard Unicode piece preset".to_string();
+                }
+                if ui.button("Use filled Unicode pieces").clicked() {
+                    self.piece_preset = PiecePreset::FilledUnicode;
+                    self.board_style_status = "Using filled Unicode piece preset".to_string();
+                }
+                if ui.button("Use letter pieces").clicked() {
+                    self.piece_preset = PiecePreset::Letters;
+                    self.board_style_status = "Using letter piece preset".to_string();
+                }
+                ui.separator();
+                ui.label("Detailed visual settings are in Workspace / Board appearance.");
+            });
+
+            ui.menu_button("Engine", |ui| {
+                if ui.button("Restart UCI child").clicked() {
+                    self.stop_engine("Restarting UCI child");
+                    if let Err(error) = self.ensure_engine() {
+                        self.engine_status = error;
+                    }
+                }
+                if ui.button("Stop engine").clicked() {
+                    self.stop_engine("UCI child stopped");
+                }
+                ui.separator();
+                ui.label("Backend and deterministic resource settings are configured in the right panel.");
+            });
+
+            ui.menu_button("Match", |ui| {
+                if ui
+                    .add_enabled(!self.match_running && !self.pending_engine, egui::Button::new("Start engine match"))
+                    .clicked()
+                {
+                    self.start_engine_match();
+                }
+                if ui
+                    .add_enabled(self.match_running, egui::Button::new("Stop engine match"))
+                    .clicked()
+                {
+                    self.stop_engine_match("Engine match stopped");
+                }
+                if ui.button("Copy match PGN").clicked() {
+                    if self.match_pgn_text.trim().is_empty() {
+                        self.update_match_pgn_text();
+                    }
+                    ui.ctx().copy_text(self.match_pgn_text.clone());
+                    self.match_status = "Match PGN copied to clipboard".to_string();
+                }
+            });
+
+            ui.menu_button("Analysis", |ui| {
+                if ui
+                    .add_enabled(!self.analysis_running, egui::Button::new("Start PGN/game analysis"))
+                    .clicked()
+                {
+                    self.start_game_analysis();
+                }
+                if ui
+                    .add_enabled(self.analysis_running, egui::Button::new("Stop analysis"))
+                    .clicked()
+                {
+                    self.stop_analysis("Analysis stopped");
+                }
+                if ui.button("Copy analysis report").clicked() {
+                    self.copy_analysis_report(ui.ctx());
+                }
+            });
+
+            ui.separator();
+            ui.label(&self.game_status);
+            ui.separator();
+            ui.label(&self.engine_status);
         });
     }
 
@@ -1579,77 +1764,72 @@ impl RChessGui {
         let previous_player_color = self.player_color;
         let previous_auto_engine = self.auto_engine;
 
-        egui::SidePanel::left("left_panel")
-            .resizable(true)
-            .default_width(250.0)
-            .show_inside(ui, |ui| {
-                ui.heading("Board controls");
-                ui.label(&self.game_status);
-                ui.separator();
-                self.show_history_navigation(ui);
-                ui.separator();
+        ui.heading("Board controls");
+        ui.label(&self.game_status);
+        ui.separator();
+        self.show_history_navigation(ui);
+        ui.separator();
 
-                ui.horizontal_wrapped(|ui| {
-                    if ui.button("New").clicked() {
-                        self.new_game();
-                    }
-                    if ui
-                        .add_enabled(!self.pending_engine && !self.match_running, egui::Button::new("Engine"))
-                        .clicked()
-                    {
-                        self.request_engine_move();
-                    }
-                    if ui
-                        .add_enabled(!self.pending_engine && !self.match_running && !self.played_moves.is_empty(), egui::Button::new("Undo"))
-                        .clicked()
-                    {
-                        self.undo_move();
-                    }
-                    if ui
-                        .add_enabled(!self.pending_engine && !self.match_running && !self.redo_moves.is_empty(), egui::Button::new("Redo"))
-                        .clicked()
-                    {
-                        self.redo_move();
-                    }
-                });
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("New").clicked() {
+                self.new_game();
+            }
+            if ui
+                .add_enabled(!self.pending_engine && !self.match_running, egui::Button::new("Engine"))
+                .clicked()
+            {
+                self.request_engine_move();
+            }
+            if ui
+                .add_enabled(!self.pending_engine && !self.match_running && !self.played_moves.is_empty(), egui::Button::new("Undo"))
+                .clicked()
+            {
+                self.undo_move();
+            }
+            if ui
+                .add_enabled(!self.pending_engine && !self.match_running && !self.redo_moves.is_empty(), egui::Button::new("Redo"))
+                .clicked()
+            {
+                self.redo_move();
+            }
+        });
 
-                ui.add(egui::Slider::new(&mut self.search_depth, 1..=8).text("Search depth"));
-                ui.checkbox(&mut self.auto_engine, "Auto engine reply");
-                ui.checkbox(&mut self.flipped, "Flip board");
-                egui::ComboBox::from_id_salt("left_player_color")
-                    .selected_text(color_name(self.player_color))
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.player_color, Color::White, "White");
-                        ui.selectable_value(&mut self.player_color, Color::Black, "Black");
-                    });
+        ui.add(egui::Slider::new(&mut self.search_depth, 1..=8).text("Search depth"));
+        ui.checkbox(&mut self.auto_engine, "Auto engine reply");
+        ui.checkbox(&mut self.flipped, "Flip board");
+        egui::ComboBox::from_id_salt("left_player_color")
+            .selected_text(color_name(self.player_color))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.player_color, Color::White, "White");
+                ui.selectable_value(&mut self.player_color, Color::Black, "Black");
+            });
 
-                ui.separator();
-                ui.heading("Position");
-                ui.add(
-                    egui::TextEdit::multiline(&mut self.fen_input)
-                        .font(egui::TextStyle::Monospace)
-                        .desired_rows(3),
-                );
-                ui.horizontal_wrapped(|ui| {
-                    if ui.button("Load FEN").clicked() {
-                        self.load_fen();
-                    }
-                    if ui.button("Copy FEN").clicked() {
-                        self.fen_input = self.position.to_fen();
-                        ui.ctx().copy_text(self.fen_input.clone());
-                    }
-                });
+        ui.separator();
+        ui.heading("Position");
+        ui.add(
+            egui::TextEdit::multiline(&mut self.fen_input)
+                .font(egui::TextStyle::Monospace)
+                .desired_rows(3),
+        );
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Load FEN").clicked() {
+                self.load_fen();
+            }
+            if ui.button("Copy FEN").clicked() {
+                self.fen_input = self.position.to_fen();
+                ui.ctx().copy_text(self.fen_input.clone());
+            }
+        });
 
-                ui.separator();
-                ui.heading("Legal moves");
-                egui::ScrollArea::vertical()
-                    .id_salt("left_legal_moves_scroll")
-                    .max_height(220.0)
-                    .show(ui, |ui| {
-                        for row in self.legal_move_rows() {
-                            ui.monospace(row);
-                        }
-                    });
+        ui.separator();
+        ui.heading("Legal moves");
+        egui::ScrollArea::vertical()
+            .id_salt("left_legal_moves_scroll")
+            .max_height(220.0)
+            .show(ui, |ui| {
+                for row in self.legal_move_rows() {
+                    ui.monospace(row);
+                }
             });
 
         let auto_was_enabled = !previous_auto_engine && self.auto_engine;
@@ -1662,13 +1842,9 @@ impl RChessGui {
     fn show_side_panel(&mut self, ui: &mut egui::Ui) {
         let previous_engine_backend = self.engine_backend;
 
-        egui::SidePanel::right("right_panel")
-            .resizable(true)
-            .default_width(390.0)
-            .show_inside(ui, |ui| {
-                ui.heading("Workspace");
-                ui.label(&self.engine_status);
-                ui.separator();
+        ui.heading("Workspace");
+        ui.label(&self.engine_status);
+        ui.separator();
 
                 ui.collapsing("PGN", |ui| {
                     ui.horizontal_wrapped(|ui| {
@@ -1707,6 +1883,10 @@ impl RChessGui {
                                     .desired_rows(8),
                             );
                         });
+                });
+
+                ui.collapsing("Board appearance", |ui| {
+                    self.show_board_appearance_panel(ui);
                 });
 
                 ui.collapsing("Engine backend", |ui| {
@@ -1809,13 +1989,154 @@ impl RChessGui {
                             }
                         });
                 });
-            });
 
         if previous_engine_backend != self.engine_backend {
             self.stop_engine("Engine backend changed");
         }
     }
 
+
+    fn show_board_appearance_panel(&mut self, ui: &mut egui::Ui) {
+        ui.label(&self.board_style_status);
+        ui.separator();
+        ui.heading("Squares");
+        color_row(ui, "Light squares", &mut self.light_square_color);
+        color_row(ui, "Dark squares", &mut self.dark_square_color);
+        color_row(ui, "Selected square", &mut self.selected_square_color);
+        color_row(ui, "Drag target", &mut self.drag_target_color);
+        color_row(ui, "Check square", &mut self.check_square_color);
+        color_row(ui, "Legal quiet move", &mut self.legal_move_color);
+        color_row(ui, "Legal capture", &mut self.legal_capture_color);
+
+        ui.separator();
+        ui.heading("Pieces");
+        egui::ComboBox::from_id_salt("piece_preset")
+            .selected_text(self.piece_preset.label())
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.piece_preset, PiecePreset::StandardUnicode, PiecePreset::StandardUnicode.label());
+                ui.selectable_value(&mut self.piece_preset, PiecePreset::FilledUnicode, PiecePreset::FilledUnicode.label());
+                ui.selectable_value(&mut self.piece_preset, PiecePreset::Letters, PiecePreset::Letters.label());
+                ui.selectable_value(&mut self.piece_preset, PiecePreset::Custom, PiecePreset::Custom.label());
+            });
+        ui.add(egui::Slider::new(&mut self.piece_scale, 0.45..=0.95).text("Piece scale"));
+        color_row(ui, "White pieces", &mut self.white_piece_color);
+        color_row(ui, "Black pieces", &mut self.black_piece_color);
+        color_row(ui, "Piece shadow", &mut self.piece_shadow_color);
+
+        ui.separator();
+        ui.heading("Coordinates");
+        ui.checkbox(&mut self.show_coordinates, "Show coordinates");
+        color_row(ui, "Coordinate text on light", &mut self.coordinate_light_color);
+        color_row(ui, "Coordinate text on dark", &mut self.coordinate_dark_color);
+
+        ui.separator();
+        ui.heading("Custom piece preset");
+        ui.label("Format: 12 whitespace-separated glyphs: WK WQ WR WB WN WP BK BQ BR BB BN BP.");
+        ui.add(
+            egui::TextEdit::multiline(&mut self.custom_piece_preset_text)
+                .font(egui::TextStyle::Monospace)
+                .desired_rows(3),
+        );
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Load custom from text").clicked() {
+                self.load_custom_piece_preset_from_text();
+            }
+            if ui.button("Export active custom text").clicked() {
+                self.custom_piece_preset_text = self.custom_piece_glyphs.to_preset_text();
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("Preset file");
+            ui.text_edit_singleline(&mut self.custom_piece_preset_path);
+        });
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Open preset file").clicked() {
+                self.open_custom_piece_preset_file();
+            }
+            if ui.button("Save preset file").clicked() {
+                self.save_custom_piece_preset_file();
+            }
+            if ui.button("Restore defaults").clicked() {
+                self.restore_default_board_theme();
+            }
+        });
+    }
+
+    fn restore_default_board_theme(&mut self) {
+        self.light_square_color = egui::Color32::from_rgb(235, 220, 190);
+        self.dark_square_color = egui::Color32::from_rgb(125, 88, 62);
+        self.selected_square_color = egui::Color32::from_rgb(190, 170, 80);
+        self.drag_target_color = egui::Color32::from_rgb(165, 150, 95);
+        self.check_square_color = egui::Color32::from_rgb(175, 80, 70);
+        self.legal_move_color = egui::Color32::from_rgb(80, 120, 70);
+        self.legal_capture_color = egui::Color32::from_rgb(80, 120, 70);
+        self.coordinate_light_color = egui::Color32::from_rgb(100, 80, 60);
+        self.coordinate_dark_color = egui::Color32::from_rgb(220, 205, 180);
+        self.white_piece_color = egui::Color32::from_rgb(245, 245, 235);
+        self.black_piece_color = egui::Color32::from_rgb(15, 15, 15);
+        self.piece_shadow_color = egui::Color32::from_rgb(25, 25, 25);
+        self.show_coordinates = true;
+        self.piece_scale = 0.66;
+        self.piece_preset = PiecePreset::StandardUnicode;
+        self.custom_piece_glyphs = PieceGlyphSet::standard_unicode();
+        self.custom_piece_preset_text = self.custom_piece_glyphs.to_preset_text();
+        self.board_style_status = "Board appearance restored to defaults".to_string();
+    }
+
+    fn load_custom_piece_preset_from_text(&mut self) {
+        match PieceGlyphSet::parse(&self.custom_piece_preset_text) {
+            Ok(glyphs) => {
+                self.custom_piece_glyphs = glyphs;
+                self.piece_preset = PiecePreset::Custom;
+                self.board_style_status = "Custom piece preset loaded from text".to_string();
+            }
+            Err(error) => {
+                self.board_style_status = error;
+            }
+        }
+    }
+
+    fn open_custom_piece_preset_file(&mut self) {
+        let path = normalize_path_input(&self.custom_piece_preset_path);
+        match fs::read_to_string(&path) {
+            Ok(text) => {
+                self.custom_piece_preset_text = text;
+                self.load_custom_piece_preset_from_text();
+                if self.piece_preset == PiecePreset::Custom {
+                    self.board_style_status = format!("Custom piece preset loaded from {path}");
+                }
+            }
+            Err(error) => {
+                self.board_style_status = format!("cannot read custom piece preset: {error}");
+            }
+        }
+    }
+
+    fn save_custom_piece_preset_file(&mut self) {
+        let path = normalize_path_input(&self.custom_piece_preset_path);
+        if path.is_empty() {
+            self.board_style_status = "custom piece preset path is empty".to_string();
+            return;
+        }
+        self.custom_piece_preset_text = self.custom_piece_glyphs.to_preset_text();
+        match fs::write(&path, &self.custom_piece_preset_text) {
+            Ok(()) => {
+                self.board_style_status = format!("Custom piece preset saved to {path}");
+            }
+            Err(error) => {
+                self.board_style_status = format!("cannot save custom piece preset: {error}");
+            }
+        }
+    }
+
+    fn piece_glyph(&self, piece: rchess::chess::Piece) -> String {
+        match self.piece_preset {
+            PiecePreset::StandardUnicode => piece.unicode().to_string(),
+            PiecePreset::FilledUnicode => PieceGlyphSet::filled_unicode().glyph(piece).to_string(),
+            PiecePreset::Letters => PieceGlyphSet::letters().glyph(piece).to_string(),
+            PiecePreset::Custom => self.custom_piece_glyphs.glyph(piece).to_string(),
+        }
+    }
 
     fn show_engine_resource_settings(&mut self, ui: &mut egui::Ui) {
         ui.separator();
@@ -1964,72 +2285,72 @@ impl RChessGui {
     }
 
     fn show_board(&mut self, ui: &mut egui::Ui) {
-        egui::CentralPanel::default().show_inside(ui, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.add_space(10.0);
+        ui.vertical_centered(|ui| {
+            ui.add_space(6.0);
 
-                let display_position = self.display_position();
-                let eval_cp = self.display_eval_cp_white(&display_position);
-                let max_size = (ui.available_width() - 46.0).min(ui.available_height() - 54.0);
-                let board_size = max_size.clamp(320.0, 640.0);
+            let display_position = self.display_position();
+            let eval_cp = self.display_eval_cp_white(&display_position);
+            let available_width = ui.available_width().max(360.0);
+            let available_height = ui.available_height().max(360.0);
+            let max_size = (available_width - 46.0).min(available_height - 64.0);
+            let board_size = max_size.clamp(280.0, 720.0);
 
-                ui.horizontal_centered(|ui| {
-                    self.paint_evaluation_bar(ui, board_size, eval_cp);
+            ui.horizontal_centered(|ui| {
+                self.paint_evaluation_bar(ui, board_size, eval_cp);
 
-                    let (rect, response) = ui.allocate_exact_size(
-                        egui::vec2(board_size, board_size),
-                        egui::Sense::click_and_drag(),
-                    );
+                let (rect, response) = ui.allocate_exact_size(
+                    egui::vec2(board_size, board_size),
+                    egui::Sense::click_and_drag(),
+                );
 
-                    if self.is_history_view_live() && response.drag_started() {
-                        if let Some(pointer_pos) = response.interact_pointer_pos() {
-                            if let Some(square) = pointer_to_square(rect, pointer_pos, self.flipped) {
-                                if self.select_piece(square) {
-                                    self.dragging_from = Some(square);
-                                    self.drag_pointer = Some(pointer_pos);
-                                }
+                if self.is_history_view_live() && response.drag_started() {
+                    if let Some(pointer_pos) = response.interact_pointer_pos() {
+                        if let Some(square) = pointer_to_square(rect, pointer_pos, self.flipped) {
+                            if self.select_piece(square) {
+                                self.dragging_from = Some(square);
+                                self.drag_pointer = Some(pointer_pos);
                             }
                         }
                     }
+                }
 
+                if self.dragging_from.is_some() {
+                    if let Some(pointer_pos) = response.interact_pointer_pos() {
+                        self.drag_pointer = Some(pointer_pos);
+                    }
+                }
+
+                self.paint_board(ui, rect, &display_position);
+
+                if response.drag_stopped() {
                     if self.dragging_from.is_some() {
-                        if let Some(pointer_pos) = response.interact_pointer_pos() {
-                            self.drag_pointer = Some(pointer_pos);
-                        }
-                    }
-
-                    self.paint_board(ui, rect, &display_position);
-
-                    if response.drag_stopped() {
-                        if self.dragging_from.is_some() {
-                            if let Some(pointer_pos) = self.drag_pointer.or_else(|| response.interact_pointer_pos()) {
-                                if let Some(square) = pointer_to_square(rect, pointer_pos, self.flipped) {
-                                    self.try_apply_selected_to(square);
-                                } else {
-                                    self.clear_selection();
-                                }
-                            }
-                        }
-                        self.dragging_from = None;
-                        self.drag_pointer = None;
-                    } else if self.is_history_view_live() && response.clicked() {
-                        if let Some(pointer_pos) = response.interact_pointer_pos() {
+                        if let Some(pointer_pos) = self.drag_pointer.or_else(|| response.interact_pointer_pos()) {
                             if let Some(square) = pointer_to_square(rect, pointer_pos, self.flipped) {
-                                self.select_square(square);
+                                self.try_apply_selected_to(square);
+                            } else {
+                                self.clear_selection();
                             }
                         }
                     }
-                });
-
-                ui.add_space(8.0);
-                ui.horizontal_wrapped(|ui| {
-                    ui.monospace(format!("{} | eval {}", self.history_view_label(), format_cp_value(eval_cp)));
-                    if !self.is_history_view_live() && ui.button("Return live").clicked() {
-                        self.history_to_live();
+                    self.dragging_from = None;
+                    self.drag_pointer = None;
+                } else if self.is_history_view_live() && response.clicked() {
+                    if let Some(pointer_pos) = response.interact_pointer_pos() {
+                        if let Some(square) = pointer_to_square(rect, pointer_pos, self.flipped) {
+                            self.select_square(square);
+                        }
                     }
-                });
-                ui.monospace(display_position.to_fen());
+                }
             });
+
+            ui.add_space(8.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.monospace(format!("{} | eval {}", self.history_view_label(), format_cp_value(eval_cp)));
+                if !self.is_history_view_live() && ui.button("Return live").clicked() {
+                    self.history_to_live();
+                }
+            });
+            ui.monospace(display_position.to_fen());
         });
     }
 
@@ -2083,17 +2404,17 @@ impl RChessGui {
 
                 let is_light = (row + col) % 2 == 0;
                 let mut fill = if is_light {
-                    egui::Color32::from_rgb(235, 220, 190)
+                    self.light_square_color
                 } else {
-                    egui::Color32::from_rgb(125, 88, 62)
+                    self.dark_square_color
                 };
 
                 if check_square == Some(square) {
-                    fill = egui::Color32::from_rgb(175, 80, 70);
+                    fill = self.check_square_color;
                 } else if selected == Some(square) {
-                    fill = egui::Color32::from_rgb(190, 170, 80);
+                    fill = self.selected_square_color;
                 } else if self.dragging_from.is_some() && drag_target == Some(square) {
-                    fill = egui::Color32::from_rgb(165, 150, 95);
+                    fill = self.drag_target_color;
                 }
 
                 painter.rect_filled(square_rect, 0.0, fill);
@@ -2104,13 +2425,13 @@ impl RChessGui {
                         painter.circle_stroke(
                             center,
                             square_size * 0.36,
-                            egui::Stroke::new(4.0, egui::Color32::from_rgb(80, 120, 70)),
+                            egui::Stroke::new(4.0, self.legal_capture_color),
                         );
                     } else {
                         painter.circle_filled(
                             center,
                             square_size * 0.13,
-                            egui::Color32::from_rgb(80, 120, 70),
+                            self.legal_move_color,
                         );
                     }
                 }
@@ -2151,42 +2472,26 @@ impl RChessGui {
         center: egui::Pos2,
         square_size: f32,
     ) {
-        let glyph = piece.unicode().to_string();
-        let font = egui::FontId::proportional(square_size * 0.66);
-        match piece.color {
-            Color::White => {
-                painter.text(
-                    center + egui::vec2(1.4, 1.4),
-                    egui::Align2::CENTER_CENTER,
-                    &glyph,
-                    font.clone(),
-                    egui::Color32::from_rgb(25, 25, 25),
-                );
-                painter.text(
-                    center,
-                    egui::Align2::CENTER_CENTER,
-                    glyph,
-                    font,
-                    egui::Color32::from_rgb(245, 245, 235),
-                );
-            }
-            Color::Black => {
-                painter.text(
-                    center + egui::vec2(1.2, 1.2),
-                    egui::Align2::CENTER_CENTER,
-                    &glyph,
-                    font.clone(),
-                    egui::Color32::from_rgb(230, 220, 200),
-                );
-                painter.text(
-                    center,
-                    egui::Align2::CENTER_CENTER,
-                    glyph,
-                    font,
-                    egui::Color32::from_rgb(15, 15, 15),
-                );
-            }
-        }
+        let glyph = self.piece_glyph(piece);
+        let font = egui::FontId::proportional(square_size * self.piece_scale);
+        let piece_color = match piece.color {
+            Color::White => self.white_piece_color,
+            Color::Black => self.black_piece_color,
+        };
+        painter.text(
+            center + egui::vec2(1.3, 1.3),
+            egui::Align2::CENTER_CENTER,
+            &glyph,
+            font.clone(),
+            self.piece_shadow_color,
+        );
+        painter.text(
+            center,
+            egui::Align2::CENTER_CENTER,
+            glyph,
+            font,
+            piece_color,
+        );
     }
 
     fn paint_square_coordinates(
@@ -2201,10 +2506,13 @@ impl RChessGui {
         let file = (b'a' + square % 8) as char;
         let rank = (b'1' + square / 8) as char;
         let is_light = (row + col) % 2 == 0;
+        if !self.show_coordinates {
+            return;
+        }
         let text_color = if is_light {
-            egui::Color32::from_rgb(100, 80, 60)
+            self.coordinate_light_color
         } else {
-            egui::Color32::from_rgb(220, 205, 180)
+            self.coordinate_dark_color
         };
         let font = egui::FontId::proportional((square_size * 0.15).max(9.0));
 
@@ -2252,10 +2560,49 @@ impl eframe::App for RChessGui {
         self.poll_match_engines();
         self.poll_analysis_engine();
         self.handle_history_keyboard(ui.ctx());
+
         self.show_top_panel(ui);
-        self.show_left_panel(ui);
-        self.show_side_panel(ui);
-        self.show_board(ui);
+        ui.separator();
+
+        let total_width = ui.available_width().max(720.0);
+        let total_height = ui.available_height().max(520.0);
+        let left_width = 260.0;
+        let mut right_width = 390.0_f32.min((total_width * 0.36).max(310.0));
+        if total_width - left_width - right_width - 28.0 < 340.0 {
+            right_width = (total_width - left_width - 340.0 - 28.0).clamp(260.0, 390.0);
+        }
+        let board_width = (total_width - left_width - right_width - 28.0).max(340.0);
+
+        ui.horizontal_top(|ui| {
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.set_min_width(left_width);
+                ui.set_max_width(left_width);
+                egui::ScrollArea::vertical()
+                    .id_salt("left_panel_scroll")
+                    .max_height(total_height)
+                    .show(ui, |ui| self.show_left_panel(ui));
+            });
+
+            ui.add_space(6.0);
+
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.set_min_width(board_width);
+                ui.set_max_width(board_width);
+                self.show_board(ui);
+            });
+
+            ui.add_space(6.0);
+
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.set_min_width(right_width);
+                ui.set_max_width(right_width);
+                egui::ScrollArea::vertical()
+                    .id_salt("right_workspace_scroll")
+                    .max_height(total_height)
+                    .show(ui, |ui| self.show_side_panel(ui));
+            });
+        });
+
         self.show_promotion_dialog(ui.ctx());
 
         if self.pending_engine || self.match_running || self.analysis_running {
@@ -2331,6 +2678,14 @@ impl Drop for UciEngine {
         let _ = self.stdin.flush();
         let _ = self.child.kill();
     }
+}
+
+fn color_row(ui: &mut egui::Ui, label: &str, color: &mut egui::Color32) {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        ui.color_edit_button_srgba(color);
+        ui.monospace(format!("#{:02X}{:02X}{:02X}", color.r(), color.g(), color.b()));
+    });
 }
 
 fn send_rchess_resource_options(

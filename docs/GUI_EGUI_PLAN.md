@@ -194,3 +194,9 @@ White UCI process  <->  Game controller  <->  Black UCI process
 ```
 
 Первый такой слой уже вынесен в `src/matchplay.rs`: там есть два UCI-слота, контроллер партии, PGN-лог и ограничения поиска по глубине или времени. GUI теперь подключает к нему два реальных дочерних UCI-процесса и минимальный loop матча. Каждый движок остаётся заменяемым UCI-процессом.
+
+## Layout and appearance pass
+
+The board must remain the center of the GUI. Side panels can grow, but they should not be allowed to hide the board or the evaluation bar. The current layout is intentionally explicit: left controls, central board/evaluation, right workspace.
+
+Appearance customization is GUI-only. It does not affect the chess core, search, PGN or UCI protocol. Current customization is glyph-based: square colors, highlight colors, coordinate colors, piece colors, piece scale, built-in piece presets and a custom glyph preset loaded from text/file. Future SVG/PNG asset presets should be added as a rendering layer, not as chess logic.
