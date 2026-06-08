@@ -1,1 +1,10 @@
 /target
+
+# Optional external Stockfish build outputs
+/third_party/stockfish-sf_10/src/*.o
+/third_party/stockfish-sf_10/src/*.obj
+/third_party/stockfish-sf_10/src/stockfish
+/third_party/stockfish-sf_10/src/stockfish.exe
+/third_party/stockfish-sf_10/src/*.pgo
+/third_party/stockfish-sf_10/src/*.gcda
+/third_party/stockfish-sf_10/src/*.gcno

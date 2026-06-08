@@ -15,6 +15,7 @@
 - Простая статическая оценка: материал, центр, развитие пешек, пара слонов.
 - UCI-протокол для подключения к GUI вроде Cute Chess, Arena, Banksia и другим.
 - Rust GUI MVP на `egui/eframe`.
+- Выбор backend-движка в GUI: наш UCI, vendored Stockfish 10 или любой внешний UCI executable.
 - Базовый PGN/SAN: импорт, экспорт, FEN-tag, GUI-блок и CLI-проверка.
 
 Ядро правил, поиск, UCI и PGN остаются без внешних зависимостей. GUI использует `egui/eframe` как отдельный интерфейсный слой.
@@ -122,6 +123,7 @@ src/pgn.rs
 - [`docs/GUI_EGUI_PLAN.md`](docs/GUI_EGUI_PLAN.md) — направление для Rust GUI на `egui/eframe` без смешивания интерфейса и ядра.
 - [`docs/GUI_MVP.md`](docs/GUI_MVP.md) — текущее состояние GUI MVP.
 - [`docs/PGN.md`](docs/PGN.md) — текущий PGN/SAN-слой.
+- [`docs/ENGINE_BACKENDS.md`](docs/ENGINE_BACKENDS.md) — подключение внешних UCI-движков, Stockfish 10 и будущий engine-vs-engine режим.
 - [`docs/CORE_TESTING.md`](docs/CORE_TESTING.md) — что сейчас проверяется в ядре правил.
 
 ## Дальше
@@ -131,7 +133,8 @@ src/pgn.rs
 1. Продолжать добивать надёжность ядра: больше `perft divide`-позиций, отдельные edge-case тесты для pinned pieces, discovered check, double check, castling rights и halfmove clock.
 2. Улучшить силу: transposition table, killer/history move ordering, iterative deepening, нормальный time control.
 3. Улучшить GUI: файловый диалог вместо ручного пути, undo/redo, панель legal moves, вывод engine info и более аккуратная нотация истории.
-4. Начать выносить методики поиска в явные модули, чтобы потом можно было сравнивать и комбинировать стратегии.
+4. Подготовить engine-vs-engine режим: два UCI-слота, контроллер партии, PGN-лог, ограничения по глубине/времени.
+5. Начать выносить методики поиска в явные модули, чтобы потом можно было сравнивать и комбинировать стратегии.
 
 ## Rust GUI MVP
 
@@ -163,7 +166,7 @@ MVP умеет:
 - показывать список ходов в SAN;
 - показывать UCI-лог.
 
-Для внешнего UCI-движка можно указать путь в поле `External engine path`. Если поле пустое, GUI использует встроенный дочерний UCI-процесс.
+В GUI теперь есть выбор engine backend: `rchess internal UCI`, `Stockfish 10` или `Custom UCI executable`. Для Stockfish 10 в проект добавлен исходный код в `third_party/stockfish-sf_10`, но он не собирается через Cargo. Нужно собрать исполняемый файл отдельно и указать путь в GUI или нажать `Detect Stockfish 10`, если бинарник лежит в ожидаемом месте.
 
 ### Первые исправления GUI
 

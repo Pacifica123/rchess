@@ -41,7 +41,7 @@ rchess-gui --engine-mode
 GUI process  <->  stdin/stdout  <->  UCI engine process
 ```
 
-При необходимости в поле `External engine path` можно указать другой UCI-движок.
+При необходимости можно выбрать другой backend: vendored Stockfish 10 или произвольный внешний UCI executable. GUI всё равно общается с ним через stdin/stdout по UCI.
 
 ## Что уже есть
 
@@ -66,6 +66,7 @@ GUI process  <->  stdin/stdout  <->  UCI engine process
 - Открытие и сохранение PGN по указанному пути.
 - UCI-лог.
 - Возможность перезапуска дочернего UCI-процесса.
+- Выбор backend-движка: встроенный rchess UCI, Stockfish 10 или произвольный внешний UCI executable.
 
 ## Что сознательно не входит в MVP
 
@@ -155,3 +156,20 @@ uci_log_scroll
 ## GUI increment: PGN и управление ходом
 
 Следующий слой GUI добавил `Copy PGN`, ручное поле пути для `Open PGN file` / `Save PGN file`, список ходов в SAN, drag-and-drop и окно выбора promotion-фигуры. Это всё ещё MVP: для файлов используется обычная строка пути, без системного файлового диалога.
+
+
+## Engine backends
+
+GUI теперь не привязан только к нашему поиску. В правой панели есть `Engine backend`:
+
+```text
+rchess internal UCI
+Stockfish 10
+Custom UCI executable
+```
+
+`rchess internal UCI` запускает текущий GUI-бинарник с `--engine-mode`, как и раньше.
+
+`Stockfish 10` ожидает исполняемый файл, собранный из исходников в `third_party/stockfish-sf_10`. GUI умеет искать стандартные пути и подставлять ожидаемый `third_party` path, но не собирает C++-код сам.
+
+`Custom UCI executable` оставлен для любого другого движка. Это первый практический шаг к будущему режиму `engine vs engine`, где будет два независимых UCI-процесса и отдельный контроллер партии.
