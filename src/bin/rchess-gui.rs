@@ -6,7 +6,7 @@ use std::thread;
 use std::time::Duration;
 
 use eframe::egui;
-use rchess::chess::{square_name, ChessMove, Color, PieceKind, Position, STARTPOS_FEN};
+use rchess::chess::{ChessMove, Color, PieceKind, Position, STARTPOS_FEN};
 
 fn main() -> eframe::Result<()> {
     if env::args().any(|arg| arg == "--engine-mode") {
@@ -81,7 +81,7 @@ impl RChessGui {
         self.send_to_engine("ucinewgame");
         self.refresh_game_status();
 
-        if self.auto_engine && self.position.side_to_move() != self.player_color {
+        if self.should_auto_engine_move() {
             self.request_engine_move();
         }
     }
@@ -141,6 +141,14 @@ impl RChessGui {
         self.selected_moves.clear();
     }
 
+    fn should_auto_engine_move(&self) -> bool {
+        self.auto_engine
+            && !self.pending_engine
+            && self.position.side_to_move() != self.player_color
+            && !self.position.is_checkmate()
+            && !self.position.is_stalemate()
+    }
+
     fn move_from_selected_to(&self, to: u8) -> Option<ChessMove> {
         let mut candidates = self
             .selected_moves
@@ -165,11 +173,7 @@ impl RChessGui {
                 self.clear_selection();
                 self.refresh_game_status();
 
-                if self.auto_engine
-                    && self.position.side_to_move() != self.player_color
-                    && !self.position.is_checkmate()
-                    && !self.position.is_stalemate()
-                {
+                if self.should_auto_engine_move() {
                     self.request_engine_move();
                 }
             }
@@ -296,12 +300,18 @@ impl RChessGui {
     }
 
     fn show_top_panel(&mut self, ui: &mut egui::Ui) {
+        let previous_player_color = self.player_color;
+        let previous_auto_engine = self.auto_engine;
+
         egui::TopBottomPanel::top("top_panel").show_inside(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 if ui.button("New game").clicked() {
                     self.new_game();
                 }
-                if ui.button("Engine move").clicked() {
+                if ui
+                    .add_enabled(!self.pending_engine, egui::Button::new("Engine move"))
+                    .clicked()
+                {
                     self.request_engine_move();
                 }
                 ui.add(egui::Slider::new(&mut self.search_depth, 1..=8).text("Depth"));
@@ -315,6 +325,12 @@ impl RChessGui {
                     });
             });
         });
+
+        let auto_was_enabled = !previous_auto_engine && self.auto_engine;
+        let player_color_changed = previous_player_color != self.player_color;
+        if (auto_was_enabled || player_color_changed) && self.should_auto_engine_move() {
+            self.request_engine_move();
+        }
     }
 
     fn show_side_panel(&mut self, ui: &mut egui::Ui) {
@@ -354,20 +370,27 @@ impl RChessGui {
                 ui.separator();
                 ui.heading("Moves");
                 egui::ScrollArea::vertical()
-                    .max_height(150.0)
+                    .id_salt("moves_scroll")
+                    .max_height(140.0)
                     .show(ui, |ui| {
-                        for (index, move_text) in self.played_moves.iter().enumerate() {
-                            if index % 2 == 0 {
-                                ui.label(format!("{}. {}", index / 2 + 1, move_text));
-                            } else {
-                                ui.label(format!("   ... {move_text}"));
-                            }
+                        for (index, pair) in self.played_moves.chunks(2).enumerate() {
+                            let white_move = pair.first().map(String::as_str).unwrap_or("");
+                            let black_move = pair.get(1).map(String::as_str).unwrap_or("");
+                            ui.monospace(format!("{}. {:<6} {}", index + 1, white_move, black_move));
                         }
                     });
 
                 ui.separator();
-                ui.heading("UCI log");
-                egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.heading("UCI log");
+                    if ui.button("Clear").clicked() {
+                        self.engine_log.clear();
+                    }
+                });
+                egui::ScrollArea::vertical()
+                    .id_salt("uci_log_scroll")
+                    .max_height(260.0)
+                    .show(ui, |ui| {
                     for line in &self.engine_log {
                         ui.monospace(line);
                     }
@@ -379,61 +402,185 @@ impl RChessGui {
         egui::CentralPanel::default().show_inside(ui, |ui| {
             ui.vertical_centered(|ui| {
                 ui.add_space(10.0);
-                egui::Grid::new("board_grid")
-                    .spacing(egui::vec2(0.0, 0.0))
-                    .show(ui, |ui| {
-                        for row in 0..8 {
-                            for col in 0..8 {
-                                let square = view_square(row, col, self.flipped);
-                                let clicked = self.square_button(ui, square, row, col).clicked();
-                                if clicked {
-                                    self.select_square(square);
-                                }
-                            }
-                            ui.end_row();
+
+                let max_size = ui.available_width().min(ui.available_height() - 28.0);
+                let board_size = max_size.clamp(320.0, 640.0);
+                let (rect, response) = ui.allocate_exact_size(
+                    egui::vec2(board_size, board_size),
+                    egui::Sense::click(),
+                );
+
+                self.paint_board(ui, rect);
+
+                if response.clicked() {
+                    if let Some(pointer_pos) = response.interact_pointer_pos() {
+                        if let Some(square) = pointer_to_square(rect, pointer_pos, self.flipped) {
+                            self.select_square(square);
                         }
-                    });
+                    }
+                }
+
                 ui.add_space(8.0);
                 ui.monospace(self.position.to_fen());
             });
         });
     }
 
-    fn square_button(&self, ui: &mut egui::Ui, square: u8, row: usize, col: usize) -> egui::Response {
-        let piece = self.position.piece_at(square);
-        let mut text = piece
-            .map(|piece| piece.unicode().to_string())
-            .unwrap_or_else(|| " ".to_string());
-        if text == " " {
-            text.push(' ');
+    fn paint_board(&self, ui: &mut egui::Ui, rect: egui::Rect) {
+        let painter = ui.painter_at(rect);
+        let square_size = rect.width() / 8.0;
+        let selected = self.selected;
+        let legal_targets: Vec<u8> = self.selected_moves.iter().map(|chess_move| chess_move.to).collect();
+        let check_square = self.checked_king_square();
+
+        for row in 0..8 {
+            for col in 0..8 {
+                let square = view_square(row, col, self.flipped);
+                let min = egui::pos2(
+                    rect.left() + col as f32 * square_size,
+                    rect.top() + row as f32 * square_size,
+                );
+                let square_rect = egui::Rect::from_min_size(min, egui::vec2(square_size, square_size));
+
+                let is_light = (row + col) % 2 == 0;
+                let mut fill = if is_light {
+                    egui::Color32::from_rgb(235, 220, 190)
+                } else {
+                    egui::Color32::from_rgb(125, 88, 62)
+                };
+
+                if check_square == Some(square) {
+                    fill = egui::Color32::from_rgb(175, 80, 70);
+                } else if selected == Some(square) {
+                    fill = egui::Color32::from_rgb(190, 170, 80);
+                }
+
+                painter.rect_filled(square_rect, 0.0, fill);
+
+                if legal_targets.contains(&square) {
+                    let center = square_rect.center();
+                    if self.position.piece_at(square).is_some() {
+                        painter.circle_stroke(
+                            center,
+                            square_size * 0.36,
+                            egui::Stroke::new(4.0, egui::Color32::from_rgb(80, 120, 70)),
+                        );
+                    } else {
+                        painter.circle_filled(
+                            center,
+                            square_size * 0.13,
+                            egui::Color32::from_rgb(80, 120, 70),
+                        );
+                    }
+                }
+
+                if let Some(piece) = self.position.piece_at(square) {
+                    let glyph = piece.unicode().to_string();
+                    let font = egui::FontId::proportional(square_size * 0.66);
+                    let center = square_rect.center();
+                    match piece.color {
+                        Color::White => {
+                            painter.text(
+                                center + egui::vec2(1.4, 1.4),
+                                egui::Align2::CENTER_CENTER,
+                                &glyph,
+                                font.clone(),
+                                egui::Color32::from_rgb(25, 25, 25),
+                            );
+                            painter.text(
+                                center,
+                                egui::Align2::CENTER_CENTER,
+                                glyph,
+                                font,
+                                egui::Color32::from_rgb(245, 245, 235),
+                            );
+                        }
+                        Color::Black => {
+                            painter.text(
+                                center + egui::vec2(1.2, 1.2),
+                                egui::Align2::CENTER_CENTER,
+                                &glyph,
+                                font.clone(),
+                                egui::Color32::from_rgb(230, 220, 200),
+                            );
+                            painter.text(
+                                center,
+                                egui::Align2::CENTER_CENTER,
+                                glyph,
+                                font,
+                                egui::Color32::from_rgb(15, 15, 15),
+                            );
+                        }
+                    }
+                }
+
+                self.paint_square_coordinates(&painter, square_rect, square, row, col, square_size);
+            }
         }
 
-        let is_light = (row + col) % 2 == 0;
-        let is_selected = self.selected == Some(square);
-        let is_target = self.selected_moves.iter().any(|chess_move| chess_move.to == square);
-        let fill = if is_selected {
-            egui::Color32::from_rgb(190, 170, 80)
-        } else if is_target {
-            egui::Color32::from_rgb(120, 150, 90)
-        } else if is_light {
-            egui::Color32::from_rgb(235, 220, 190)
-        } else {
-            egui::Color32::from_rgb(120, 85, 60)
-        };
-        let text_color = if is_light {
-            egui::Color32::from_rgb(25, 25, 25)
-        } else {
-            egui::Color32::from_rgb(240, 240, 240)
-        };
-        let label = egui::RichText::new(text).size(42.0).color(text_color);
-
-        ui.add(
-            egui::Button::new(label)
-                .min_size(egui::vec2(64.0, 64.0))
-                .fill(fill),
-        )
-        .on_hover_text(square_name(square))
+        painter.rect_stroke(
+            rect,
+            0.0,
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(40, 40, 40)),
+            egui::StrokeKind::Outside,
+        );
     }
+
+    fn paint_square_coordinates(
+        &self,
+        painter: &egui::Painter,
+        square_rect: egui::Rect,
+        square: u8,
+        row: usize,
+        col: usize,
+        square_size: f32,
+    ) {
+        let file = (b'a' + square % 8) as char;
+        let rank = (b'1' + square / 8) as char;
+        let is_light = (row + col) % 2 == 0;
+        let text_color = if is_light {
+            egui::Color32::from_rgb(100, 80, 60)
+        } else {
+            egui::Color32::from_rgb(220, 205, 180)
+        };
+        let font = egui::FontId::proportional((square_size * 0.15).max(9.0));
+
+        if col == 0 {
+            painter.text(
+                square_rect.left_top() + egui::vec2(4.0, 3.0),
+                egui::Align2::LEFT_TOP,
+                rank,
+                font.clone(),
+                text_color,
+            );
+        }
+        if row == 7 {
+            painter.text(
+                square_rect.right_bottom() - egui::vec2(4.0, 3.0),
+                egui::Align2::RIGHT_BOTTOM,
+                file,
+                font,
+                text_color,
+            );
+        }
+    }
+
+    fn checked_king_square(&self) -> Option<u8> {
+        let color = self.position.side_to_move();
+        if !self.position.is_in_check(color) {
+            return None;
+        }
+
+        for square in 0..64 {
+            if let Some(piece) = self.position.piece_at(square) {
+                if piece.color == color && piece.kind == PieceKind::King {
+                    return Some(square);
+                }
+            }
+        }
+        None
+    }
+
 }
 
 impl eframe::App for RChessGui {
@@ -515,6 +662,21 @@ impl Drop for UciEngine {
         let _ = self.stdin.flush();
         let _ = self.child.kill();
     }
+}
+
+fn pointer_to_square(rect: egui::Rect, pointer_pos: egui::Pos2, flipped: bool) -> Option<u8> {
+    if !rect.contains(pointer_pos) {
+        return None;
+    }
+
+    let square_size = rect.width() / 8.0;
+    let col = ((pointer_pos.x - rect.left()) / square_size).floor() as usize;
+    let row = ((pointer_pos.y - rect.top()) / square_size).floor() as usize;
+    if row >= 8 || col >= 8 {
+        return None;
+    }
+
+    Some(view_square(row, col, flipped))
 }
 
 fn view_square(row: usize, col: usize, flipped: bool) -> u8 {
