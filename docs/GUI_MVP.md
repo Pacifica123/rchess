@@ -192,3 +192,19 @@ Custom UCI executable
 В правой панели есть блок `Engine vs engine`. В нём два UCI-слота: White и Black. Если поле пути пустое, слот запускает встроенный rchess UCI через текущий бинарник с `--engine-mode`. Если путь задан, GUI запускает внешний UCI executable.
 
 Матч использует `src/matchplay.rs`: контроллер выдаёт `position fen ...`, выбирает `go depth N` или `go movetime N`, принимает `bestmove`, применяет ход через ядро правил и обновляет PGN-лог. Сейчас есть ограничение `Max plies`, чтобы случайная длинная партия не висела бесконечно.
+
+## Layout pass: menu + left panel
+
+The GUI now splits controls into three zones:
+
+- top menu: `File`, `Game`, `Engine`, `Match`, `Analysis`;
+- left panel: common board controls, FEN and legal moves;
+- right workspace: PGN text, backend setup, engine-vs-engine, game analysis, move history and logs.
+
+This is not a final UX. It is a cleanup pass that prevents the right panel from becoming a dump of unrelated controls.
+
+## Game analysis MVP
+
+The right workspace contains a `Game analysis` section. It can analyse the PGN text field, or the current game if the PGN field is empty. It starts the selected UCI backend as a separate process and evaluates positions before and after every played move.
+
+The first metrics are deliberately simple: centipawn loss and a deterministic accuracy value per move, then average accuracy for both sides.

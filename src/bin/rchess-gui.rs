@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::env;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -8,6 +9,7 @@ use std::thread;
 use std::time::Duration;
 
 use eframe::egui;
+use rchess::analysis::{format_accuracy, format_cp, AnalysisJob, GameAnalysis};
 use rchess::chess::{square_name, ChessMove, Color, PieceKind, Position, STARTPOS_FEN};
 use rchess::matchplay::{EngineMatchController, SearchLimit, UciEngineSlot};
 use rchess::pgn::{export_pgn, move_to_san, parse_pgn, position_after_moves};
@@ -90,6 +92,16 @@ struct RChessGui {
     match_status: String,
     match_log: Vec<String>,
     match_pgn_text: String,
+    analysis_depth: u8,
+    analysis: Option<GameAnalysis>,
+    analysis_engine: Option<UciEngine>,
+    analysis_rx: Option<Receiver<String>>,
+    analysis_jobs: VecDeque<AnalysisJob>,
+    analysis_current_job: Option<AnalysisJob>,
+    analysis_last_score_cp: Option<i32>,
+    analysis_running: bool,
+    analysis_status: String,
+    analysis_log: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -151,12 +163,23 @@ impl RChessGui {
             match_status: "Engine match is idle".to_string(),
             match_log: Vec::new(),
             match_pgn_text: String::new(),
+            analysis_depth: 3,
+            analysis: None,
+            analysis_engine: None,
+            analysis_rx: None,
+            analysis_jobs: VecDeque::new(),
+            analysis_current_job: None,
+            analysis_last_score_cp: None,
+            analysis_running: false,
+            analysis_status: "Analysis is idle".to_string(),
+            analysis_log: Vec::new(),
         };
         app.refresh_game_status();
         app
     }
 
     fn new_game(&mut self) {
+        self.stop_analysis("Analysis stopped by new game");
         self.stop_engine_match("Engine match stopped by new game");
         self.position = Position::startpos();
         self.fen_input = STARTPOS_FEN.to_string();
@@ -180,6 +203,7 @@ impl RChessGui {
     }
 
     fn load_fen(&mut self) {
+        self.stop_analysis("Analysis stopped by FEN load");
         self.stop_engine_match("Engine match stopped by FEN load");
         match Position::from_fen(self.fen_input.trim()) {
             Ok(position) => {
@@ -255,6 +279,7 @@ impl RChessGui {
     }
 
     fn load_pgn_from_text(&mut self) {
+        self.stop_analysis("Analysis stopped by PGN load");
         self.stop_engine_match("Engine match stopped by PGN load");
         match parse_pgn(&self.pgn_text).and_then(|game| {
             let position = position_after_moves(&game.start_fen, &game.moves)?;
@@ -887,6 +912,172 @@ impl RChessGui {
         }
     }
 
+
+    fn start_game_analysis(&mut self) {
+        if self.match_running {
+            self.analysis_status = "Stop engine-vs-engine match before analysis".to_string();
+            return;
+        }
+        self.stop_analysis("Restarting analysis");
+
+        let (start_fen, moves) = match self.analysis_source_history() {
+            Ok(value) => value,
+            Err(error) => {
+                self.analysis_status = error;
+                return;
+            }
+        };
+        if moves.is_empty() {
+            self.analysis_status = "No moves to analyse".to_string();
+            return;
+        }
+
+        let analysis = match GameAnalysis::from_history(&start_fen, &moves) {
+            Ok(analysis) => analysis,
+            Err(error) => {
+                self.analysis_status = format!("Analysis setup error: {error}");
+                return;
+            }
+        };
+        let jobs: VecDeque<AnalysisJob> = analysis.jobs().into_iter().collect();
+        if jobs.is_empty() {
+            self.analysis_status = "No analysis jobs".to_string();
+            return;
+        }
+
+        let command = match self.current_engine_command() {
+            Ok(command) => command,
+            Err(error) => {
+                self.analysis_status = format!("Analysis engine error: {error}");
+                return;
+            }
+        };
+        let label = command.label.clone();
+        let (engine, rx) = match UciEngine::spawn(command) {
+            Ok(value) => value,
+            Err(error) => {
+                self.analysis_status = format!("Analysis engine start error: {error}");
+                return;
+            }
+        };
+
+        self.analysis = Some(analysis);
+        self.analysis_jobs = jobs;
+        self.analysis_engine = Some(engine);
+        self.analysis_rx = Some(rx);
+        self.analysis_current_job = None;
+        self.analysis_last_score_cp = None;
+        self.analysis_running = true;
+        self.analysis_log.clear();
+        self.analysis_status = format!("Analysing with {label} at depth {}", self.analysis_depth);
+        self.send_to_analysis_engine("uci");
+        self.send_to_analysis_engine("isready");
+        self.request_next_analysis_job();
+    }
+
+    fn analysis_source_history(&self) -> Result<(String, Vec<ChessMove>), String> {
+        if !self.pgn_text.trim().is_empty() {
+            let game = parse_pgn(&self.pgn_text)?;
+            Ok((game.start_fen, game.moves))
+        } else {
+            Ok((self.game_start_fen.clone(), self.played_moves.clone()))
+        }
+    }
+
+    fn stop_analysis(&mut self, status: impl Into<String>) {
+        self.analysis_engine = None;
+        self.analysis_rx = None;
+        self.analysis_jobs.clear();
+        self.analysis_current_job = None;
+        self.analysis_last_score_cp = None;
+        self.analysis_running = false;
+        self.analysis_status = status.into();
+    }
+
+    fn send_to_analysis_engine(&mut self, command: &str) {
+        let result = if let Some(engine) = &mut self.analysis_engine {
+            engine.send(command).map_err(|error| error.to_string())
+        } else {
+            Ok(())
+        };
+        if let Err(error) = result {
+            self.analysis_status = format!("Analysis UCI write error: {error}");
+            self.stop_analysis("Analysis stopped after UCI write error");
+        }
+    }
+
+    fn request_next_analysis_job(&mut self) {
+        if !self.analysis_running || self.analysis_current_job.is_some() {
+            return;
+        }
+        let Some(job) = self.analysis_jobs.pop_front() else {
+            self.analysis_running = false;
+            self.analysis_status = self
+                .analysis
+                .as_ref()
+                .map(|analysis| format!("Analysis finished: {}", analysis.summary().verdict))
+                .unwrap_or_else(|| "Analysis finished".to_string());
+            return;
+        };
+        self.analysis_last_score_cp = None;
+        self.send_to_analysis_engine(&format!("position fen {}", job.fen));
+        self.send_to_analysis_engine(&format!("go depth {}", self.analysis_depth));
+        let ply = job.item_index + 1;
+        self.analysis_status = format!("Analysing ply {ply} at depth {}", self.analysis_depth);
+        self.analysis_current_job = Some(job);
+    }
+
+    fn poll_analysis_engine(&mut self) {
+        let mut lines = Vec::new();
+        if let Some(rx) = &self.analysis_rx {
+            while let Ok(line) = rx.try_recv() {
+                lines.push(line);
+            }
+        }
+        for line in lines {
+            self.handle_analysis_line(line);
+        }
+    }
+
+    fn handle_analysis_line(&mut self, line: String) {
+        self.analysis_log.push(line.clone());
+        if self.analysis_log.len() > 220 {
+            let extra = self.analysis_log.len() - 220;
+            self.analysis_log.drain(0..extra);
+        }
+
+        if line.starts_with("info ") {
+            if let Some(score_cp) = parse_uci_score_cp(&line) {
+                self.analysis_last_score_cp = Some(score_cp);
+            }
+            return;
+        }
+        if line == "uciok" || line == "readyok" || line.starts_with("id ") {
+            return;
+        }
+        if !line.starts_with("bestmove ") {
+            return;
+        }
+
+        let Some(job) = self.analysis_current_job.take() else {
+            return;
+        };
+        let score_cp = self.analysis_last_score_cp.unwrap_or(0);
+        if let Some(analysis) = self.analysis.as_mut() {
+            analysis.set_score(&job, score_cp);
+        }
+        self.request_next_analysis_job();
+    }
+
+    fn copy_analysis_report(&mut self, ctx: &egui::Context) {
+        let Some(analysis) = &self.analysis else {
+            self.analysis_status = "No analysis report yet".to_string();
+            return;
+        };
+        ctx.copy_text(analysis.report());
+        self.analysis_status = "Analysis report copied to clipboard".to_string();
+    }
+
     fn refresh_game_status(&mut self) {
         let side = color_name(self.position.side_to_move());
         self.game_status = if self.position.is_checkmate() {
@@ -1008,43 +1199,189 @@ impl RChessGui {
     }
 
     fn show_top_panel(&mut self, ui: &mut egui::Ui) {
+        egui::TopBottomPanel::top("menu_panel").show_inside(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.menu_button("File", |ui| {
+                    if ui.button("New game").clicked() {
+                        self.new_game();
+                    }
+                    if ui.button("Export PGN to text").clicked() {
+                        self.export_pgn_to_text();
+                    }
+                    if ui.button("Copy PGN").clicked() {
+                        self.copy_pgn_to_clipboard(ui.ctx());
+                    }
+                    if ui.button("Load PGN from text").clicked() {
+                        self.load_pgn_from_text();
+                    }
+                    if ui.button("Open PGN path").clicked() {
+                        self.open_pgn_from_file();
+                    }
+                    if ui.button("Save PGN path").clicked() {
+                        self.save_pgn_to_file();
+                    }
+                });
+
+                ui.menu_button("Game", |ui| {
+                    if ui
+                        .add_enabled(!self.pending_engine && !self.match_running, egui::Button::new("Engine move"))
+                        .clicked()
+                    {
+                        self.request_engine_move();
+                    }
+                    if ui
+                        .add_enabled(!self.pending_engine && !self.match_running && !self.played_moves.is_empty(), egui::Button::new("Undo"))
+                        .clicked()
+                    {
+                        self.undo_move();
+                    }
+                    if ui
+                        .add_enabled(!self.pending_engine && !self.match_running && !self.redo_moves.is_empty(), egui::Button::new("Redo"))
+                        .clicked()
+                    {
+                        self.redo_move();
+                    }
+                    if ui.button("Flip board").clicked() {
+                        self.flipped = !self.flipped;
+                    }
+                });
+
+                ui.menu_button("Engine", |ui| {
+                    if ui.button("Restart UCI child").clicked() {
+                        self.stop_engine("Restarting UCI child");
+                        if let Err(error) = self.ensure_engine() {
+                            self.engine_status = error;
+                        }
+                    }
+                    if ui.button("Stop engine").clicked() {
+                        self.stop_engine("UCI child stopped");
+                    }
+                    ui.separator();
+                    ui.label("Backend is configured in the right panel.");
+                });
+
+                ui.menu_button("Match", |ui| {
+                    if ui
+                        .add_enabled(!self.match_running && !self.pending_engine, egui::Button::new("Start engine match"))
+                        .clicked()
+                    {
+                        self.start_engine_match();
+                    }
+                    if ui
+                        .add_enabled(self.match_running, egui::Button::new("Stop engine match"))
+                        .clicked()
+                    {
+                        self.stop_engine_match("Engine match stopped");
+                    }
+                    if ui.button("Copy match PGN").clicked() {
+                        if self.match_pgn_text.trim().is_empty() {
+                            self.update_match_pgn_text();
+                        }
+                        ui.ctx().copy_text(self.match_pgn_text.clone());
+                        self.match_status = "Match PGN copied to clipboard".to_string();
+                    }
+                });
+
+                ui.menu_button("Analysis", |ui| {
+                    if ui
+                        .add_enabled(!self.analysis_running, egui::Button::new("Start PGN/game analysis"))
+                        .clicked()
+                    {
+                        self.start_game_analysis();
+                    }
+                    if ui
+                        .add_enabled(self.analysis_running, egui::Button::new("Stop analysis"))
+                        .clicked()
+                    {
+                        self.stop_analysis("Analysis stopped");
+                    }
+                    if ui.button("Copy analysis report").clicked() {
+                        self.copy_analysis_report(ui.ctx());
+                    }
+                });
+
+                ui.separator();
+                ui.label(&self.game_status);
+                ui.separator();
+                ui.label(&self.engine_status);
+            });
+        });
+    }
+
+    fn show_left_panel(&mut self, ui: &mut egui::Ui) {
         let previous_player_color = self.player_color;
         let previous_auto_engine = self.auto_engine;
 
-        egui::TopBottomPanel::top("top_panel").show_inside(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                if ui.button("New game").clicked() {
-                    self.new_game();
-                }
-                if ui
-                    .add_enabled(!self.pending_engine && !self.match_running, egui::Button::new("Engine move"))
-                    .clicked()
-                {
-                    self.request_engine_move();
-                }
-                if ui
-                    .add_enabled(!self.pending_engine && !self.match_running && !self.played_moves.is_empty(), egui::Button::new("Undo"))
-                    .clicked()
-                {
-                    self.undo_move();
-                }
-                if ui
-                    .add_enabled(!self.pending_engine && !self.match_running && !self.redo_moves.is_empty(), egui::Button::new("Redo"))
-                    .clicked()
-                {
-                    self.redo_move();
-                }
-                ui.add(egui::Slider::new(&mut self.search_depth, 1..=8).text("Depth"));
+        egui::SidePanel::left("left_panel")
+            .resizable(true)
+            .default_width(250.0)
+            .show_inside(ui, |ui| {
+                ui.heading("Board controls");
+                ui.label(&self.game_status);
+                ui.separator();
+
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("New").clicked() {
+                        self.new_game();
+                    }
+                    if ui
+                        .add_enabled(!self.pending_engine && !self.match_running, egui::Button::new("Engine"))
+                        .clicked()
+                    {
+                        self.request_engine_move();
+                    }
+                    if ui
+                        .add_enabled(!self.pending_engine && !self.match_running && !self.played_moves.is_empty(), egui::Button::new("Undo"))
+                        .clicked()
+                    {
+                        self.undo_move();
+                    }
+                    if ui
+                        .add_enabled(!self.pending_engine && !self.match_running && !self.redo_moves.is_empty(), egui::Button::new("Redo"))
+                        .clicked()
+                    {
+                        self.redo_move();
+                    }
+                });
+
+                ui.add(egui::Slider::new(&mut self.search_depth, 1..=8).text("Search depth"));
                 ui.checkbox(&mut self.auto_engine, "Auto engine reply");
                 ui.checkbox(&mut self.flipped, "Flip board");
-                egui::ComboBox::from_id_salt("player_color")
+                egui::ComboBox::from_id_salt("left_player_color")
                     .selected_text(color_name(self.player_color))
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut self.player_color, Color::White, "White");
                         ui.selectable_value(&mut self.player_color, Color::Black, "Black");
                     });
+
+                ui.separator();
+                ui.heading("Position");
+                ui.add(
+                    egui::TextEdit::multiline(&mut self.fen_input)
+                        .font(egui::TextStyle::Monospace)
+                        .desired_rows(3),
+                );
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Load FEN").clicked() {
+                        self.load_fen();
+                    }
+                    if ui.button("Copy FEN").clicked() {
+                        self.fen_input = self.position.to_fen();
+                        ui.ctx().copy_text(self.fen_input.clone());
+                    }
+                });
+
+                ui.separator();
+                ui.heading("Legal moves");
+                egui::ScrollArea::vertical()
+                    .id_salt("left_legal_moves_scroll")
+                    .max_height(220.0)
+                    .show(ui, |ui| {
+                        for row in self.legal_move_rows() {
+                            ui.monospace(row);
+                        }
+                    });
             });
-        });
 
         let auto_was_enabled = !previous_auto_engine && self.auto_engine;
         let player_color_changed = previous_player_color != self.player_color;
@@ -1058,168 +1395,148 @@ impl RChessGui {
 
         egui::SidePanel::right("right_panel")
             .resizable(true)
-            .default_width(360.0)
+            .default_width(390.0)
             .show_inside(ui, |ui| {
-                ui.heading("Position");
-                ui.label(&self.game_status);
+                ui.heading("Workspace");
                 ui.label(&self.engine_status);
                 ui.separator();
 
-                ui.label("FEN");
-                ui.text_edit_multiline(&mut self.fen_input);
-                ui.horizontal(|ui| {
-                    if ui.button("Load FEN").clicked() {
-                        self.load_fen();
-                    }
-                    if ui.button("Copy current").clicked() {
-                        self.fen_input = self.position.to_fen();
-                    }
-                });
-
-                ui.separator();
-                ui.heading("PGN");
-                ui.horizontal_wrapped(|ui| {
-                    if ui.button("Export PGN").clicked() {
-                        self.export_pgn_to_text();
-                    }
-                    if ui.button("Copy PGN").clicked() {
-                        self.copy_pgn_to_clipboard(ui.ctx());
-                    }
-                    if ui.button("Load PGN").clicked() {
-                        self.load_pgn_from_text();
-                    }
-                    if ui.button("Clear PGN").clicked() {
-                        self.pgn_text.clear();
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label("File");
-                    ui.text_edit_singleline(&mut self.pgn_path);
-                });
-                ui.horizontal(|ui| {
-                    if ui.button("Open PGN file").clicked() {
-                        self.open_pgn_from_file();
-                    }
-                    if ui.button("Save PGN file").clicked() {
-                        self.save_pgn_to_file();
-                    }
-                });
-                egui::ScrollArea::vertical()
-                    .id_salt("pgn_text_scroll")
-                    .max_height(150.0)
-                    .show(ui, |ui| {
-                        ui.add(
-                            egui::TextEdit::multiline(&mut self.pgn_text)
-                                .font(egui::TextStyle::Monospace)
-                                .desired_rows(7),
-                        );
+                ui.collapsing("PGN", |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("Export").clicked() {
+                            self.export_pgn_to_text();
+                        }
+                        if ui.button("Copy").clicked() {
+                            self.copy_pgn_to_clipboard(ui.ctx());
+                        }
+                        if ui.button("Load text").clicked() {
+                            self.load_pgn_from_text();
+                        }
+                        if ui.button("Clear").clicked() {
+                            self.pgn_text.clear();
+                        }
                     });
-
-                ui.separator();
-                ui.heading("Engine backend");
-                egui::ComboBox::from_id_salt("engine_backend")
-                    .selected_text(self.engine_backend.label())
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.engine_backend, EngineBackend::RChess, EngineBackend::RChess.label());
-                        ui.selectable_value(&mut self.engine_backend, EngineBackend::Stockfish10, EngineBackend::Stockfish10.label());
-                        ui.selectable_value(&mut self.engine_backend, EngineBackend::CustomUci, EngineBackend::CustomUci.label());
+                    ui.horizontal(|ui| {
+                        ui.label("File");
+                        ui.text_edit_singleline(&mut self.pgn_path);
                     });
-
-                match self.engine_backend {
-                    EngineBackend::RChess => {
-                        ui.label("Uses this GUI binary as a separate UCI child process with --engine-mode.");
-                    }
-                    EngineBackend::Stockfish10 => {
-                        ui.label("Optional external engine. Build the vendored Stockfish 10 source, then point this field to the resulting executable.");
-                        ui.horizontal(|ui| {
-                            ui.label("Stockfish 10");
-                            ui.text_edit_singleline(&mut self.stockfish10_path);
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("Open path").clicked() {
+                            self.open_pgn_from_file();
+                        }
+                        if ui.button("Save path").clicked() {
+                            self.save_pgn_to_file();
+                        }
+                    });
+                    egui::ScrollArea::vertical()
+                        .id_salt("pgn_text_scroll")
+                        .max_height(170.0)
+                        .show(ui, |ui| {
+                            ui.add(
+                                egui::TextEdit::multiline(&mut self.pgn_text)
+                                    .font(egui::TextStyle::Monospace)
+                                    .desired_rows(8),
+                            );
                         });
-                        ui.horizontal_wrapped(|ui| {
-                            if ui.button("Detect Stockfish 10").clicked() {
-                                match detect_stockfish10_path() {
-                                    Some(path) => {
-                                        self.stockfish10_path = path.clone();
-                                        self.stockfish10_status = format!("Detected {path}");
-                                    }
-                                    None => {
-                                        self.stockfish10_status = "No Stockfish 10 binary found near project or executable".to_string();
+                });
+
+                ui.collapsing("Engine backend", |ui| {
+                    egui::ComboBox::from_id_salt("engine_backend")
+                        .selected_text(self.engine_backend.label())
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.engine_backend, EngineBackend::RChess, EngineBackend::RChess.label());
+                            ui.selectable_value(&mut self.engine_backend, EngineBackend::Stockfish10, EngineBackend::Stockfish10.label());
+                            ui.selectable_value(&mut self.engine_backend, EngineBackend::CustomUci, EngineBackend::CustomUci.label());
+                        });
+
+                    match self.engine_backend {
+                        EngineBackend::RChess => {
+                            ui.label("Uses this GUI binary as a separate UCI child process with --engine-mode.");
+                        }
+                        EngineBackend::Stockfish10 => {
+                            ui.label("Build the vendored Stockfish 10 source, then point this field to the resulting executable.");
+                            ui.horizontal(|ui| {
+                                ui.label("Stockfish 10");
+                                ui.text_edit_singleline(&mut self.stockfish10_path);
+                            });
+                            ui.horizontal_wrapped(|ui| {
+                                if ui.button("Detect").clicked() {
+                                    match detect_stockfish10_path() {
+                                        Some(path) => {
+                                            self.stockfish10_path = path.clone();
+                                            self.stockfish10_status = format!("Detected {path}");
+                                        }
+                                        None => {
+                                            self.stockfish10_status = "No Stockfish 10 binary found near project or executable".to_string();
+                                        }
                                     }
                                 }
+                                if ui.button("Use third_party path").clicked() {
+                                    self.stockfish10_path = default_stockfish10_build_path();
+                                    self.stockfish10_status = "Set to the expected build output path".to_string();
+                                }
+                            });
+                            ui.label(&self.stockfish10_status);
+                        }
+                        EngineBackend::CustomUci => {
+                            ui.label("Path to any UCI-compatible engine executable.");
+                            ui.text_edit_singleline(&mut self.engine_path);
+                        }
+                    }
+
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("Restart UCI child").clicked() {
+                            self.stop_engine("Restarting UCI child");
+                            if let Err(error) = self.ensure_engine() {
+                                self.engine_status = error;
                             }
-                            if ui.button("Use third_party path").clicked() {
-                                self.stockfish10_path = default_stockfish10_build_path();
-                                self.stockfish10_status = "Set to the expected build output path".to_string();
+                        }
+                        if ui.button("Stop engine").clicked() {
+                            self.stop_engine("UCI child stopped");
+                        }
+                    });
+                });
+
+                ui.collapsing("Game analysis", |ui| {
+                    self.show_analysis_panel(ui);
+                });
+
+                ui.collapsing("Engine vs engine", |ui| {
+                    self.show_engine_match_panel(ui);
+                });
+
+                ui.collapsing("Move history", |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("moves_scroll")
+                        .max_height(160.0)
+                        .show(ui, |ui| {
+                            for row in self.san_move_rows() {
+                                ui.monospace(row);
                             }
                         });
-                        ui.label(&self.stockfish10_status);
-                    }
-                    EngineBackend::CustomUci => {
-                        ui.label("Path to any UCI-compatible engine executable.");
-                        ui.text_edit_singleline(&mut self.engine_path);
-                    }
-                }
-
-                ui.horizontal(|ui| {
-                    if ui.button("Restart UCI child").clicked() {
-                        self.stop_engine("Restarting UCI child");
-                        match self.ensure_engine() {
-                            Ok(()) => {}
-                            Err(error) => self.engine_status = error,
-                        }
-                    }
-                    if ui.button("Stop engine").clicked() {
-                        self.stop_engine("UCI child stopped");
-                    }
                 });
 
-                ui.separator();
-                ui.heading("Moves SAN");
-                egui::ScrollArea::vertical()
-                    .id_salt("moves_scroll")
-                    .max_height(120.0)
-                    .show(ui, |ui| {
-                        for row in self.san_move_rows() {
-                            ui.monospace(row);
+                ui.collapsing("Engine info and logs", |ui| {
+                    ui.heading("Engine info");
+                    if self.last_engine_info.is_empty() {
+                        ui.label("No search info yet");
+                    } else {
+                        ui.monospace(&self.last_engine_info);
+                    }
+                    ui.horizontal(|ui| {
+                        ui.heading("UCI log");
+                        if ui.button("Clear").clicked() {
+                            self.engine_log.clear();
                         }
                     });
-
-                ui.separator();
-                ui.heading("Legal moves");
-                egui::ScrollArea::vertical()
-                    .id_salt("legal_moves_scroll")
-                    .max_height(110.0)
-                    .show(ui, |ui| {
-                        for row in self.legal_move_rows() {
-                            ui.monospace(row);
-                        }
-                    });
-
-                ui.separator();
-                self.show_engine_match_panel(ui);
-
-                ui.separator();
-                ui.heading("Engine info");
-                if self.last_engine_info.is_empty() {
-                    ui.label("No search info yet");
-                } else {
-                    ui.monospace(&self.last_engine_info);
-                }
-
-                ui.separator();
-                ui.horizontal(|ui| {
-                    ui.heading("UCI log");
-                    if ui.button("Clear").clicked() {
-                        self.engine_log.clear();
-                    }
-                });
-                egui::ScrollArea::vertical()
-                    .id_salt("uci_log_scroll")
-                    .max_height(260.0)
-                    .show(ui, |ui| {
-                    for line in &self.engine_log {
-                        ui.monospace(line);
-                    }
+                    egui::ScrollArea::vertical()
+                        .id_salt("uci_log_scroll")
+                        .max_height(220.0)
+                        .show(ui, |ui| {
+                            for line in &self.engine_log {
+                                ui.monospace(line);
+                            }
+                        });
                 });
             });
 
@@ -1228,6 +1545,73 @@ impl RChessGui {
         }
     }
 
+
+    fn show_analysis_panel(&mut self, ui: &mut egui::Ui) {
+        ui.label(&self.analysis_status);
+        ui.add(egui::Slider::new(&mut self.analysis_depth, 1..=8).text("Analysis depth"));
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(!self.analysis_running, egui::Button::new("Start analysis"))
+                .clicked()
+            {
+                self.start_game_analysis();
+            }
+            if ui
+                .add_enabled(self.analysis_running, egui::Button::new("Stop"))
+                .clicked()
+            {
+                self.stop_analysis("Analysis stopped");
+            }
+            if ui.button("Copy report").clicked() {
+                self.copy_analysis_report(ui.ctx());
+            }
+        });
+
+        if let Some(analysis) = &self.analysis {
+            let done = analysis.completed_jobs();
+            let total = analysis.total_jobs();
+            let progress = if total == 0 { 0.0 } else { done as f32 / total as f32 };
+            ui.add(egui::ProgressBar::new(progress).text(format!("{done}/{total} evals")));
+            let summary = analysis.summary();
+            ui.label(format!("White accuracy: {}", format_accuracy(summary.white_accuracy)));
+            ui.label(format!("Black accuracy: {}", format_accuracy(summary.black_accuracy)));
+            ui.label(summary.verdict);
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .id_salt("analysis_rows_scroll")
+                .max_height(220.0)
+                .show(ui, |ui| {
+                    ui.monospace("ply side move eval-before eval-after loss acc");
+                    for item in &analysis.items {
+                        let side = color_name(item.side);
+                        let before = format_cp(item.before_score_cp);
+                        let after = format_cp(item.after_score_cp.map(|value| -value));
+                        let loss = item.loss_cp.map(|value| value.to_string()).unwrap_or_else(|| "-".to_string());
+                        let accuracy = format_accuracy(item.accuracy);
+                        ui.monospace(format!(
+                            "{:<3} {:<5} {:<8} {:<10} {:<10} {:<5} {}",
+                            item.ply, side, item.san, before, after, loss, accuracy
+                        ));
+                    }
+                });
+        } else {
+            ui.label("Paste/load a PGN or play a game, then start analysis.");
+        }
+
+        ui.collapsing("Analysis UCI log", |ui| {
+            if ui.button("Clear analysis log").clicked() {
+                self.analysis_log.clear();
+            }
+            egui::ScrollArea::vertical()
+                .id_salt("analysis_log_scroll")
+                .max_height(160.0)
+                .show(ui, |ui| {
+                    for line in &self.analysis_log {
+                        ui.monospace(line);
+                    }
+                });
+        });
+    }
 
     fn show_engine_match_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("Engine vs engine");
@@ -1525,12 +1909,14 @@ impl eframe::App for RChessGui {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_engine();
         self.poll_match_engines();
+        self.poll_analysis_engine();
         self.show_top_panel(ui);
+        self.show_left_panel(ui);
         self.show_side_panel(ui);
         self.show_board(ui);
         self.show_promotion_dialog(ui.ctx());
 
-        if self.pending_engine || self.match_running {
+        if self.pending_engine || self.match_running || self.analysis_running {
             ui.ctx().request_repaint_after(Duration::from_millis(80));
         }
     }
@@ -1604,6 +1990,25 @@ impl Drop for UciEngine {
     }
 }
 
+
+fn parse_uci_score_cp(line: &str) -> Option<i32> {
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    let score_index = parts.iter().position(|part| *part == "score")?;
+    let score_kind = *parts.get(score_index + 1)?;
+    let score_value = *parts.get(score_index + 2)?;
+    match score_kind {
+        "cp" => score_value.parse::<i32>().ok(),
+        "mate" => {
+            let mate = score_value.parse::<i32>().ok()?;
+            if mate >= 0 {
+                Some(32_000 - mate.abs().min(100) * 100)
+            } else {
+                Some(-32_000 + mate.abs().min(100) * 100)
+            }
+        }
+        _ => None,
+    }
+}
 
 fn compact_uci_info_line(line: &str) -> String {
     let mut result = Vec::new();

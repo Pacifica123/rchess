@@ -1,3 +1,4 @@
+pub mod analysis;
 pub mod chess;
 pub mod pgn;
 pub mod matchplay;

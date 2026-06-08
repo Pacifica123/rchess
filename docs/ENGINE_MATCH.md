@@ -73,3 +73,7 @@ Stockfish 10 vs custom UCI
 - отдельная таблица результата.
 
 Главное ограничение остаётся тем же: GUI и матч-контроллер не должны знать, как именно движок ищет ход. Они знают только UCI.
+
+## Shared direction with analysis
+
+The match runner and the analysis runner both use independent UCI child processes. This keeps the GUI prepared for future workflows where a game can be played by two engines and then analysed by a third selected engine.

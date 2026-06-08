@@ -37,11 +37,16 @@ pub fn run() {
         } else if let Some(rest) = line.strip_prefix("go") {
             let depth = parse_go_depth(rest).unwrap_or(4);
             engine.set_depth(depth);
-            let best_move = engine.best_move(&position);
-            println!("info depth {depth} nodes {}", engine.searched_nodes());
-            match best_move {
-                Some(chess_move) => println!("bestmove {}", chess_move.to_uci()),
-                None => println!("bestmove 0000"),
+            let best = engine.best_move_with_score(&position);
+            match best {
+                Some((chess_move, score)) => {
+                    println!("info depth {depth} score cp {score} nodes {}", engine.searched_nodes());
+                    println!("bestmove {}", chess_move.to_uci());
+                }
+                None => {
+                    println!("info depth {depth} score cp 0 nodes {}", engine.searched_nodes());
+                    println!("bestmove 0000");
+                }
             }
         } else if let Some(rest) = line.strip_prefix("perft ") {
             let depth = rest.trim().parse::<u32>().unwrap_or(1);

@@ -78,3 +78,9 @@ third_party/stockfish-sf_10/Copying.txt
 ```
 
 Если проект распространяется вместе с этим каталогом, нужно учитывать GPL-условия Stockfish. Собственное Rust-ядро не должно импортировать C++-код Stockfish и не должно зависеть от него при сборке.
+
+## Analysis backend
+
+The analysis panel reuses the same backend selection as normal engine play. The internal engine, Stockfish 10 and custom UCI executable are all represented as UCI child processes. This is intentional: future analysis must not depend on directly linking a particular engine implementation into the GUI.
+
+The internal `rchess` UCI now prints `info depth ... score cp ... nodes ...` before `bestmove`, so it can be used as the first analysis backend.

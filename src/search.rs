@@ -26,6 +26,10 @@ impl Engine {
     }
 
     pub fn best_move(&mut self, position: &Position) -> Option<ChessMove> {
+        self.best_move_with_score(position).map(|(chess_move, _score)| chess_move)
+    }
+
+    pub fn best_move_with_score(&mut self, position: &Position) -> Option<(ChessMove, i32)> {
         self.searched_nodes = 0;
         let mut moves = position.legal_moves();
         if moves.is_empty() {
@@ -48,7 +52,7 @@ impl Engine {
             }
             alpha = alpha.max(score);
         }
-        Some(best_move)
+        Some((best_move, best_score))
     }
 
     fn negamax(&mut self, position: &Position, depth: u8, mut alpha: i32, beta: i32, ply: i32) -> i32 {
