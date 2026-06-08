@@ -16,8 +16,23 @@ fn main() {
                 .next()
                 .and_then(|value| value.parse::<u32>().ok())
                 .unwrap_or(3);
-            let position = Position::startpos();
+            let fen = args.collect::<Vec<_>>().join(" ");
+            let position = parse_optional_fen(&fen);
             println!("{}", position.perft(depth));
+        }
+        Some("divide") => {
+            let depth = args
+                .next()
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(1);
+            let fen = args.collect::<Vec<_>>().join(" ");
+            let position = parse_optional_fen(&fen);
+            let rows = position.perft_divide(depth);
+            let total: u64 = rows.iter().map(|(_, nodes)| *nodes).sum();
+            for (chess_move, nodes) in rows {
+                println!("{:<5} {nodes}", chess_move.to_uci());
+            }
+            println!("total {total}");
         }
         Some("bestmove") => {
             let depth = args
@@ -94,6 +109,20 @@ fn main() {
             }
         }
         _ => rchess::uci::run(),
+    }
+}
+
+fn parse_optional_fen(fen: &str) -> Position {
+    if fen.trim().is_empty() {
+        Position::startpos()
+    } else {
+        match Position::from_fen(fen) {
+            Ok(position) => position,
+            Err(error) => {
+                eprintln!("FEN error: {error}");
+                process::exit(2);
+            }
+        }
     }
 }
 

@@ -446,6 +446,20 @@ impl Position {
         nodes
     }
 
+    pub fn perft_divide(&self, depth: u32) -> Vec<(ChessMove, u64)> {
+        if depth == 0 {
+            return Vec::new();
+        }
+
+        let mut rows = Vec::new();
+        for chess_move in self.legal_moves() {
+            let mut next = self.clone();
+            next.apply_unchecked(chess_move).expect("legal move must apply");
+            rows.push((chess_move, next.perft(depth - 1)));
+        }
+        rows
+    }
+
     pub(crate) fn apply_unchecked(&mut self, chess_move: ChessMove) -> Result<(), String> {
         let mut piece = self.board[chess_move.from as usize]
             .take()
@@ -950,6 +964,61 @@ mod tests {
             assert_eq!(position.perft(1), depth_1, "depth 1 failed for {fen}");
             assert_eq!(position.perft(2), depth_2, "depth 2 failed for {fen}");
         }
+    }
+
+    #[test]
+    fn perft_divide_matches_perft_total() {
+        let position = Position::startpos();
+        let rows = position.perft_divide(2);
+        assert_eq!(rows.len(), 20);
+        assert_eq!(rows.iter().map(|(_, nodes)| *nodes).sum::<u64>(), 400);
+        assert!(rows.iter().any(|(chess_move, nodes)| chess_move.to_uci() == "e2e4" && *nodes == 20));
+    }
+
+    #[test]
+    fn pinned_piece_cannot_move_and_expose_king() {
+        let position = Position::from_fen("4r2k/8/8/8/8/8/4B3/4K3 w - - 0 1").unwrap();
+        let pinned_from = parse_square("e2").unwrap();
+        assert!(position.legal_moves().into_iter().all(|chess_move| chess_move.from != pinned_from));
+    }
+
+    #[test]
+    fn double_check_allows_king_moves_only() {
+        let position = Position::from_fen("4r2k/8/8/8/1b6/8/8/4K3 w - - 0 1").unwrap();
+        assert!(position.is_in_check(Color::White));
+        let king_square = parse_square("e1").unwrap();
+        let moves = position.legal_moves();
+        assert!(!moves.is_empty());
+        assert!(moves.into_iter().all(|chess_move| chess_move.from == king_square));
+    }
+
+    #[test]
+    fn promotion_generates_all_quiet_and_capture_choices() {
+        let position = Position::from_fen("1r2k3/P7/8/8/8/8/8/4K3 w - - 0 1").unwrap();
+        for suffix in ["q", "r", "b", "n"] {
+            assert!(position.parse_uci_move(&format!("a7a8{suffix}")).is_some());
+            assert!(position.parse_uci_move(&format!("a7b8{suffix}")).is_some());
+        }
+
+        let black = Position::from_fen("4k3/8/8/8/8/8/7p/4K1R1 b - - 0 1").unwrap();
+        for suffix in ["q", "r", "b", "n"] {
+            assert!(black.parse_uci_move(&format!("h2h1{suffix}")).is_some());
+            assert!(black.parse_uci_move(&format!("h2g1{suffix}")).is_some());
+        }
+    }
+
+    #[test]
+    fn en_passant_that_exposes_own_king_is_illegal() {
+        let position = Position::from_fen("4r2k/8/8/3pP3/8/8/8/4K3 w - d6 0 1").unwrap();
+        assert!(position.parse_uci_move("e5d6").is_none());
+    }
+
+    #[test]
+    fn black_en_passant_removes_captured_pawn() {
+        let mut position = Position::from_fen("4k3/8/8/8/3Pp3/8/8/4K3 b - d3 0 1").unwrap();
+        let chess_move = position.parse_uci_move("e4d3").unwrap();
+        position.make_legal_move(chess_move).unwrap();
+        assert_eq!(position.to_fen(), "4k3/8/8/8/8/3p4/8/4K3 w - - 0 2");
     }
 
     #[test]

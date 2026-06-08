@@ -132,6 +132,17 @@ pub fn position_after_moves(start_fen: &str, moves: &[ChessMove]) -> Result<Posi
     Ok(position)
 }
 
+pub fn moves_to_san(start_fen: &str, moves: &[ChessMove]) -> Result<Vec<String>, String> {
+    let mut position = Position::from_fen(start_fen.trim())?;
+    let mut result = Vec::with_capacity(moves.len());
+    for chess_move in moves {
+        let san = move_to_san(&position, *chess_move)?;
+        position.make_legal_move(*chess_move)?;
+        result.push(san);
+    }
+    Ok(result)
+}
+
 pub fn move_to_san(position: &Position, chess_move: ChessMove) -> Result<String, String> {
     let piece = position
         .piece_at(chess_move.from)
@@ -464,5 +475,12 @@ mod tests {
         assert_eq!(game.moves.len(), 1);
         let position = position_after_moves(&game.start_fen, &game.moves).unwrap();
         assert_eq!(position.side_to_move(), Color::White);
+    }
+
+    #[test]
+    fn moves_to_san_returns_plain_san_list() {
+        let game = parse_pgn("1. e4 e5 2. Nf3 Nc6 *").unwrap();
+        let san = moves_to_san(&game.start_fen, &game.moves).unwrap();
+        assert_eq!(san, vec!["e4", "e5", "Nf3", "Nc6"]);
     }
 }

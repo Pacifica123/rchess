@@ -1,4 +1,5 @@
 use std::env;
+use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
@@ -6,8 +7,8 @@ use std::thread;
 use std::time::Duration;
 
 use eframe::egui;
-use rchess::chess::{ChessMove, Color, PieceKind, Position, STARTPOS_FEN};
-use rchess::pgn::{export_pgn, parse_pgn, position_after_moves};
+use rchess::chess::{square_name, ChessMove, Color, PieceKind, Position, STARTPOS_FEN};
+use rchess::pgn::{export_pgn, move_to_san, parse_pgn, position_after_moves};
 
 fn main() -> eframe::Result<()> {
     if env::args().any(|arg| arg == "--engine-mode") {
@@ -32,8 +33,11 @@ struct RChessGui {
     fen_input: String,
     game_start_fen: String,
     pgn_text: String,
+    pgn_path: String,
     selected: Option<u8>,
     selected_moves: Vec<ChessMove>,
+    dragging_from: Option<u8>,
+    promotion_request: Option<PromotionRequest>,
     played_moves: Vec<ChessMove>,
     player_color: Color,
     auto_engine: bool,
@@ -48,6 +52,13 @@ struct RChessGui {
     engine_log: Vec<String>,
 }
 
+#[derive(Clone)]
+struct PromotionRequest {
+    from: u8,
+    to: u8,
+    options: Vec<ChessMove>,
+}
+
 impl RChessGui {
     fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         let position = Position::startpos();
@@ -55,9 +66,12 @@ impl RChessGui {
             fen_input: STARTPOS_FEN.to_string(),
             game_start_fen: STARTPOS_FEN.to_string(),
             pgn_text: String::new(),
+            pgn_path: String::new(),
             position,
             selected: None,
             selected_moves: Vec::new(),
+            dragging_from: None,
+            promotion_request: None,
             played_moves: Vec::new(),
             player_color: Color::White,
             auto_engine: true,
@@ -81,6 +95,8 @@ impl RChessGui {
         self.game_start_fen = STARTPOS_FEN.to_string();
         self.selected = None;
         self.selected_moves.clear();
+        self.dragging_from = None;
+        self.promotion_request = None;
         self.played_moves.clear();
         self.pgn_text.clear();
         self.pending_engine = false;
@@ -101,6 +117,8 @@ impl RChessGui {
                 self.pgn_text.clear();
                 self.selected = None;
                 self.selected_moves.clear();
+                self.dragging_from = None;
+                self.promotion_request = None;
                 self.played_moves.clear();
                 self.pending_engine = false;
                 self.engine_status = "FEN loaded".to_string();
@@ -125,6 +143,44 @@ impl RChessGui {
         }
     }
 
+    fn copy_pgn_to_clipboard(&mut self, ctx: &egui::Context) {
+        if self.pgn_text.trim().is_empty() {
+            self.export_pgn_to_text();
+        }
+        ctx.copy_text(self.pgn_text.clone());
+        self.engine_status = "PGN copied to clipboard".to_string();
+    }
+
+    fn save_pgn_to_file(&mut self) {
+        let path = self.pgn_path.trim().to_string();
+        if path.is_empty() {
+            self.engine_status = "PGN path is empty".to_string();
+            return;
+        }
+        if self.pgn_text.trim().is_empty() {
+            self.export_pgn_to_text();
+        }
+        match fs::write(&path, &self.pgn_text) {
+            Ok(()) => self.engine_status = format!("PGN saved to {path}"),
+            Err(error) => self.engine_status = format!("PGN save error: {error}"),
+        }
+    }
+
+    fn open_pgn_from_file(&mut self) {
+        let path = self.pgn_path.trim().to_string();
+        if path.is_empty() {
+            self.engine_status = "PGN path is empty".to_string();
+            return;
+        }
+        match fs::read_to_string(&path) {
+            Ok(text) => {
+                self.pgn_text = text;
+                self.load_pgn_from_text();
+            }
+            Err(error) => self.engine_status = format!("PGN open error: {error}"),
+        }
+    }
+
     fn load_pgn_from_text(&mut self) {
         match parse_pgn(&self.pgn_text).and_then(|game| {
             let position = position_after_moves(&game.start_fen, &game.moves)?;
@@ -137,6 +193,8 @@ impl RChessGui {
                 self.fen_input = self.position.to_fen();
                 self.selected = None;
                 self.selected_moves.clear();
+                self.dragging_from = None;
+                self.promotion_request = None;
                 self.pending_engine = false;
                 self.engine_status = format!("PGN loaded, result {}", game.result);
                 self.refresh_game_status();
@@ -165,7 +223,7 @@ impl RChessGui {
     }
 
     fn select_square(&mut self, square: u8) {
-        if self.pending_engine {
+        if self.pending_engine || self.promotion_request.is_some() {
             return;
         }
 
@@ -175,31 +233,43 @@ impl RChessGui {
                 return;
             }
 
-            if let Some(chess_move) = self.move_from_selected_to(square) {
-                self.apply_user_move(chess_move);
+            if self.try_apply_selected_to(square) {
                 return;
             }
         }
 
-        if let Some(piece) = self.position.piece_at(square) {
-            if piece.color == self.position.side_to_move() {
-                self.selected = Some(square);
-                self.selected_moves = self
-                    .position
-                    .legal_moves()
-                    .into_iter()
-                    .filter(|chess_move| chess_move.from == square)
-                    .collect();
-                return;
-            }
+        if self.select_piece(square) {
+            return;
         }
 
         self.clear_selection();
     }
 
+    fn select_piece(&mut self, square: u8) -> bool {
+        if self.pending_engine || self.promotion_request.is_some() {
+            return false;
+        }
+        let Some(piece) = self.position.piece_at(square) else {
+            return false;
+        };
+        if piece.color != self.position.side_to_move() {
+            return false;
+        }
+
+        self.selected = Some(square);
+        self.selected_moves = self
+            .position
+            .legal_moves()
+            .into_iter()
+            .filter(|chess_move| chess_move.from == square)
+            .collect();
+        true
+    }
+
     fn clear_selection(&mut self) {
         self.selected = None;
         self.selected_moves.clear();
+        self.dragging_from = None;
     }
 
     fn should_auto_engine_move(&self) -> bool {
@@ -210,19 +280,37 @@ impl RChessGui {
             && !self.position.is_stalemate()
     }
 
-    fn move_from_selected_to(&self, to: u8) -> Option<ChessMove> {
-        let mut candidates = self
+    fn try_apply_selected_to(&mut self, to: u8) -> bool {
+        let Some(from) = self.selected else {
+            return false;
+        };
+        let candidates: Vec<ChessMove> = self
             .selected_moves
             .iter()
             .copied()
-            .filter(|chess_move| chess_move.to == to);
-        let first = candidates.next()?;
-        if first.promotion == Some(PieceKind::Queen) {
-            return Some(first);
+            .filter(|chess_move| chess_move.to == to)
+            .collect();
+        if candidates.is_empty() {
+            return false;
         }
-        candidates
-            .find(|chess_move| chess_move.promotion == Some(PieceKind::Queen))
-            .or(Some(first))
+
+        if candidates.iter().any(|chess_move| chess_move.promotion.is_some()) {
+            self.promotion_request = Some(PromotionRequest { from, to, options: candidates });
+            self.engine_status = "Choose promotion piece".to_string();
+        } else {
+            self.apply_user_move(candidates[0]);
+        }
+        true
+    }
+
+    fn apply_promotion_choice(&mut self, kind: PieceKind) {
+        let Some(request) = self.promotion_request.take() else {
+            return;
+        };
+        match request.options.into_iter().find(|chess_move| chess_move.promotion == Some(kind)) {
+            Some(chess_move) => self.apply_user_move(chess_move),
+            None => self.engine_status = "Selected promotion is not legal".to_string(),
+        }
     }
 
     fn apply_user_move(&mut self, chess_move: ChessMove) {
@@ -231,6 +319,7 @@ impl RChessGui {
                 self.played_moves.push(chess_move);
                 self.fen_input = self.position.to_fen();
                 self.clear_selection();
+                self.promotion_request = None;
                 self.refresh_game_status();
 
                 if self.should_auto_engine_move() {
@@ -359,6 +448,101 @@ impl RChessGui {
         };
     }
 
+    fn san_move_rows(&self) -> Vec<String> {
+        let mut position = match Position::from_fen(&self.game_start_fen) {
+            Ok(position) => position,
+            Err(_) => {
+                return self
+                    .played_moves
+                    .chunks(2)
+                    .enumerate()
+                    .map(|(index, pair)| {
+                        let white_move = pair.first().map(|chess_move| chess_move.to_uci()).unwrap_or_default();
+                        let black_move = pair.get(1).map(|chess_move| chess_move.to_uci()).unwrap_or_default();
+                        format!("{}. {:<8} {}", index + 1, white_move, black_move)
+                    })
+                    .collect();
+            }
+        };
+
+        let mut move_number = start_fullmove_number(&self.game_start_fen);
+        let mut current_row = String::new();
+        let mut rows = Vec::new();
+
+        for chess_move in &self.played_moves {
+            let side = position.side_to_move();
+            let san = match move_to_san(&position, *chess_move) {
+                Ok(san) => san,
+                Err(_) => chess_move.to_uci(),
+            };
+
+            if side == Color::White {
+                if !current_row.is_empty() {
+                    rows.push(current_row);
+                }
+                current_row = format!("{move_number}. {san}");
+            } else {
+                if current_row.is_empty() {
+                    current_row = format!("{move_number}... {san}");
+                } else {
+                    current_row.push_str(&format!(" {san}"));
+                }
+                rows.push(current_row);
+                current_row = String::new();
+                move_number += 1;
+            }
+
+            if position.make_legal_move(*chess_move).is_err() {
+                break;
+            }
+        }
+
+        if !current_row.is_empty() {
+            rows.push(current_row);
+        }
+        rows
+    }
+
+    fn show_promotion_dialog(&mut self, ctx: &egui::Context) {
+        let Some(request) = self.promotion_request.clone() else {
+            return;
+        };
+
+        let mut chosen = None;
+        let mut cancel = false;
+        egui::Window::new("Promotion")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label(format!("{} -> {}", square_name(request.from), square_name(request.to)));
+                ui.horizontal(|ui| {
+                    for (kind, label) in [
+                        (PieceKind::Queen, "Queen"),
+                        (PieceKind::Rook, "Rook"),
+                        (PieceKind::Bishop, "Bishop"),
+                        (PieceKind::Knight, "Knight"),
+                    ] {
+                        if request.options.iter().any(|chess_move| chess_move.promotion == Some(kind))
+                            && ui.button(label).clicked()
+                        {
+                            chosen = Some(kind);
+                        }
+                    }
+                });
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+            });
+
+        if let Some(kind) = chosen {
+            self.apply_promotion_choice(kind);
+        } else if cancel {
+            self.promotion_request = None;
+            self.clear_selection();
+        }
+    }
+
     fn show_top_panel(&mut self, ui: &mut egui::Ui) {
         let previous_player_color = self.player_color;
         let previous_auto_engine = self.auto_engine;
@@ -416,15 +600,30 @@ impl RChessGui {
 
                 ui.separator();
                 ui.heading("PGN");
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     if ui.button("Export PGN").clicked() {
                         self.export_pgn_to_text();
+                    }
+                    if ui.button("Copy PGN").clicked() {
+                        self.copy_pgn_to_clipboard(ui.ctx());
                     }
                     if ui.button("Load PGN").clicked() {
                         self.load_pgn_from_text();
                     }
                     if ui.button("Clear PGN").clicked() {
                         self.pgn_text.clear();
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("File");
+                    ui.text_edit_singleline(&mut self.pgn_path);
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Open PGN file").clicked() {
+                        self.open_pgn_from_file();
+                    }
+                    if ui.button("Save PGN file").clicked() {
+                        self.save_pgn_to_file();
                     }
                 });
                 egui::ScrollArea::vertical()
@@ -452,15 +651,13 @@ impl RChessGui {
                 }
 
                 ui.separator();
-                ui.heading("Moves");
+                ui.heading("Moves SAN");
                 egui::ScrollArea::vertical()
                     .id_salt("moves_scroll")
                     .max_height(140.0)
                     .show(ui, |ui| {
-                        for (index, pair) in self.played_moves.chunks(2).enumerate() {
-                            let white_move = pair.first().map(|chess_move| chess_move.to_uci()).unwrap_or_default();
-                            let black_move = pair.get(1).map(|chess_move| chess_move.to_uci()).unwrap_or_default();
-                            ui.monospace(format!("{}. {:<6} {}", index + 1, white_move, black_move));
+                        for row in self.san_move_rows() {
+                            ui.monospace(row);
                         }
                     });
 
@@ -491,12 +688,31 @@ impl RChessGui {
                 let board_size = max_size.clamp(320.0, 640.0);
                 let (rect, response) = ui.allocate_exact_size(
                     egui::vec2(board_size, board_size),
-                    egui::Sense::click(),
+                    egui::Sense::click_and_drag(),
                 );
 
                 self.paint_board(ui, rect);
 
-                if response.clicked() {
+                if response.drag_started() {
+                    if let Some(pointer_pos) = response.interact_pointer_pos() {
+                        if let Some(square) = pointer_to_square(rect, pointer_pos, self.flipped) {
+                            if self.select_piece(square) {
+                                self.dragging_from = Some(square);
+                            }
+                        }
+                    }
+                }
+
+                if response.drag_stopped() {
+                    if self.dragging_from.is_some() {
+                        if let Some(pointer_pos) = response.interact_pointer_pos() {
+                            if let Some(square) = pointer_to_square(rect, pointer_pos, self.flipped) {
+                                self.try_apply_selected_to(square);
+                            }
+                        }
+                    }
+                    self.dragging_from = None;
+                } else if response.clicked() {
                     if let Some(pointer_pos) = response.interact_pointer_pos() {
                         if let Some(square) = pointer_to_square(rect, pointer_pos, self.flipped) {
                             self.select_square(square);
@@ -673,6 +889,7 @@ impl eframe::App for RChessGui {
         self.show_top_panel(ui);
         self.show_side_panel(ui);
         self.show_board(ui);
+        self.show_promotion_dialog(ui.ctx());
 
         if self.pending_engine {
             ui.ctx().request_repaint_after(Duration::from_millis(80));
@@ -777,4 +994,11 @@ fn color_name(color: Color) -> &'static str {
         Color::White => "White",
         Color::Black => "Black",
     }
+}
+
+fn start_fullmove_number(fen: &str) -> u32 {
+    fen.split_whitespace()
+        .nth(5)
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(1)
 }
