@@ -2285,17 +2285,20 @@ impl RChessGui {
     }
 
     fn show_board(&mut self, ui: &mut egui::Ui) {
-        ui.vertical_centered(|ui| {
-            ui.add_space(6.0);
-
+        ui.vertical(|ui| {
             let display_position = self.display_position();
             let eval_cp = self.display_eval_cp_white(&display_position);
-            let available_width = ui.available_width().max(360.0);
-            let available_height = ui.available_height().max(360.0);
-            let max_size = (available_width - 46.0).min(available_height - 64.0);
-            let board_size = max_size.clamp(280.0, 720.0);
+            let available_width = ui.available_width().max(320.0);
+            let available_height = ui.available_height().max(320.0);
+            let board_size = (available_width - 46.0)
+                .min(available_height - 74.0)
+                .clamp(260.0, 720.0);
+            let row_width = board_size + 38.0;
+            let leading_space = ((available_width - row_width) * 0.5).max(0.0);
 
-            ui.horizontal_centered(|ui| {
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.add_space(leading_space);
                 self.paint_evaluation_bar(ui, board_size, eval_cp);
 
                 let (rect, response) = ui.allocate_exact_size(
@@ -2350,7 +2353,12 @@ impl RChessGui {
                     self.history_to_live();
                 }
             });
-            ui.monospace(display_position.to_fen());
+            egui::ScrollArea::horizontal()
+                .id_salt("display_fen_scroll")
+                .max_height(24.0)
+                .show(ui, |ui| {
+                    ui.monospace(display_position.to_fen());
+                });
         });
     }
 
@@ -2566,40 +2574,53 @@ impl eframe::App for RChessGui {
 
         let total_width = ui.available_width().max(720.0);
         let total_height = ui.available_height().max(520.0);
-        let left_width = 260.0;
-        let mut right_width = 390.0_f32.min((total_width * 0.36).max(310.0));
-        if total_width - left_width - right_width - 28.0 < 340.0 {
-            right_width = (total_width - left_width - 340.0 - 28.0).clamp(260.0, 390.0);
-        }
-        let board_width = (total_width - left_width - right_width - 28.0).max(340.0);
+        let gap = 6.0;
+        let left_width = if total_width < 980.0 { 205.0 } else { 230.0 };
+        let right_width = if total_width < 980.0 { 260.0 } else { 320.0 };
+        let board_width = (total_width - left_width - right_width - gap * 2.0).max(360.0);
 
         ui.horizontal_top(|ui| {
-            egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.allocate_ui(egui::vec2(left_width, total_height), |ui| {
+                ui.set_width(left_width);
                 ui.set_min_width(left_width);
                 ui.set_max_width(left_width);
-                egui::ScrollArea::vertical()
-                    .id_salt("left_panel_scroll")
-                    .max_height(total_height)
-                    .show(ui, |ui| self.show_left_panel(ui));
+                ui.set_clip_rect(ui.max_rect());
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.set_width(left_width - 12.0);
+                    egui::ScrollArea::vertical()
+                        .id_salt("left_panel_scroll")
+                        .max_height(total_height)
+                        .show(ui, |ui| self.show_left_panel(ui));
+                });
             });
 
-            ui.add_space(6.0);
+            ui.add_space(gap);
 
-            egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.allocate_ui(egui::vec2(board_width, total_height), |ui| {
+                ui.set_width(board_width);
                 ui.set_min_width(board_width);
                 ui.set_max_width(board_width);
-                self.show_board(ui);
+                ui.set_clip_rect(ui.max_rect());
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.set_width(board_width - 12.0);
+                    self.show_board(ui);
+                });
             });
 
-            ui.add_space(6.0);
+            ui.add_space(gap);
 
-            egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.allocate_ui(egui::vec2(right_width, total_height), |ui| {
+                ui.set_width(right_width);
                 ui.set_min_width(right_width);
                 ui.set_max_width(right_width);
-                egui::ScrollArea::vertical()
-                    .id_salt("right_workspace_scroll")
-                    .max_height(total_height)
-                    .show(ui, |ui| self.show_side_panel(ui));
+                ui.set_clip_rect(ui.max_rect());
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.set_width(right_width - 12.0);
+                    egui::ScrollArea::vertical()
+                        .id_salt("right_workspace_scroll")
+                        .max_height(total_height)
+                        .show(ui, |ui| self.show_side_panel(ui));
+                });
             });
         });
 

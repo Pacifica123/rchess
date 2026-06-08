@@ -264,3 +264,9 @@ WK WQ WR WB WN WP BK BQ BR BB BN BP
 ```
 
 This is not yet an SVG/PNG asset pipeline. That can be added later without touching the chess core.
+
+## Layout invariant
+
+GUI уже содержит много инструментов: PGN, анализ, engine backends, engine-vs-engine, UCI logs и appearance-настройки. Из-за этого доска должна считаться главным закреплённым виджетом, а не обычным элементом потока. Текущий layout выделяет под неё отдельную центральную колонку; боковые панели обязаны скроллиться внутри себя и не должны сжимать доску до исчезновения.
+
+Шкала оценки является частью центральной колонки и должна оставаться рядом с доской при следующих изменениях интерфейса.
