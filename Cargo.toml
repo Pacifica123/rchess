@@ -1,6 +1,16 @@
 [package]
 name = "rchess"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
+default-run = "rchess"
 
 [dependencies]
+eframe = "0.34.3"
+
+[[bin]]
+name = "rchess"
+path = "src/main.rs"
+
+[[bin]]
+name = "rchess-gui"
+path = "src/bin/rchess-gui.rs"

@@ -1,12 +1,8 @@
-mod chess;
-mod search;
-mod uci;
-
 use std::env;
 use std::process;
 
-use chess::Position;
-use search::Engine;
+use rchess::chess::Position;
+use rchess::search::Engine;
 
 fn main() {
     let mut args = env::args().skip(1);
@@ -56,6 +52,6 @@ fn main() {
                 }
             }
         }
-        _ => uci::run(),
+        _ => rchess::uci::run(),
     }
 }
