@@ -2284,6 +2284,159 @@ impl RChessGui {
             });
     }
 
+
+    fn show_center_board_panel(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 4.0, egui::Color32::from_rgb(14, 14, 14));
+        painter.rect_stroke(
+            rect,
+            4.0,
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(48, 48, 48)),
+            egui::StrokeKind::Outside,
+        );
+
+        let inner = rect.shrink(10.0);
+        if inner.width() < 260.0 || inner.height() < 300.0 {
+            painter.text(
+                inner.center(),
+                egui::Align2::CENTER_CENTER,
+                "Window is too small for the board",
+                egui::FontId::proportional(16.0),
+                egui::Color32::from_rgb(180, 180, 180),
+            );
+            return;
+        }
+
+        let display_position = self.display_position();
+        let eval_cp = self.display_eval_cp_white(&display_position);
+        let eval_width = 30.0;
+        let eval_gap = 8.0;
+        let footer_height = 58.0;
+        let max_board = (inner.width() - eval_width - eval_gap)
+            .min(inner.height() - footer_height)
+            .floor();
+        let board_size = max_board.clamp(220.0, 720.0);
+        let board_size = board_size.min(inner.width() - eval_width - eval_gap).min(inner.height() - footer_height);
+
+        if board_size < 160.0 {
+            painter.text(
+                inner.center(),
+                egui::Align2::CENTER_CENTER,
+                "Not enough room for the board",
+                egui::FontId::proportional(16.0),
+                egui::Color32::from_rgb(180, 180, 180),
+            );
+            return;
+        }
+
+        let group_width = eval_width + eval_gap + board_size;
+        let group_left = inner.left() + ((inner.width() - group_width) * 0.5).max(0.0);
+        let group_top = inner.top() + ((inner.height() - footer_height - board_size) * 0.40).max(0.0);
+        let eval_rect = egui::Rect::from_min_size(
+            egui::pos2(group_left, group_top),
+            egui::vec2(eval_width, board_size),
+        );
+        let board_rect = egui::Rect::from_min_size(
+            egui::pos2(group_left + eval_width + eval_gap, group_top),
+            egui::vec2(board_size, board_size),
+        );
+
+        self.paint_evaluation_bar_in_rect(ui, eval_rect, eval_cp);
+
+        let response = ui.interact(
+            board_rect,
+            ui.make_persistent_id("rchess_main_board_interact"),
+            egui::Sense::click_and_drag(),
+        );
+
+        if self.is_history_view_live() && response.drag_started() {
+            if let Some(pointer_pos) = response.interact_pointer_pos() {
+                if let Some(square) = pointer_to_square(board_rect, pointer_pos, self.flipped) {
+                    if self.select_piece(square) {
+                        self.dragging_from = Some(square);
+                        self.drag_pointer = Some(pointer_pos);
+                    }
+                }
+            }
+        }
+
+        if self.dragging_from.is_some() {
+            if let Some(pointer_pos) = response.interact_pointer_pos() {
+                self.drag_pointer = Some(pointer_pos);
+            }
+        }
+
+        self.paint_board(ui, board_rect, &display_position);
+
+        if response.drag_stopped() {
+            if self.dragging_from.is_some() {
+                if let Some(pointer_pos) = self.drag_pointer.or_else(|| response.interact_pointer_pos()) {
+                    if let Some(square) = pointer_to_square(board_rect, pointer_pos, self.flipped) {
+                        self.try_apply_selected_to(square);
+                    } else {
+                        self.clear_selection();
+                    }
+                }
+            }
+            self.dragging_from = None;
+            self.drag_pointer = None;
+        } else if self.is_history_view_live() && response.clicked() {
+            if let Some(pointer_pos) = response.interact_pointer_pos() {
+                if let Some(square) = pointer_to_square(board_rect, pointer_pos, self.flipped) {
+                    self.select_square(square);
+                }
+            }
+        }
+
+        let footer_top = board_rect.bottom() + 8.0;
+        let footer_rect = egui::Rect::from_min_max(
+            egui::pos2(inner.left(), footer_top),
+            egui::pos2(inner.right(), inner.bottom()),
+        );
+        ui.allocate_ui_at_rect(footer_rect, |ui| {
+            ui.set_clip_rect(footer_rect);
+            ui.horizontal_wrapped(|ui| {
+                ui.monospace(format!("{} | eval {}", self.history_view_label(), format_cp_value(eval_cp)));
+                if !self.is_history_view_live() && ui.button("Return live").clicked() {
+                    self.history_to_live();
+                }
+            });
+            egui::ScrollArea::horizontal()
+                .id_salt("display_fen_scroll_fixed_center")
+                .max_height(24.0)
+                .show(ui, |ui| {
+                    ui.monospace(display_position.to_fen());
+                });
+        });
+    }
+
+    fn paint_evaluation_bar_in_rect(&self, ui: &mut egui::Ui, rect: egui::Rect, score_cp: i32) {
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 3.0, egui::Color32::from_rgb(20, 20, 20));
+
+        let clamped = score_cp.clamp(-1000, 1000) as f32;
+        let white_ratio = (0.5 + clamped / 2000.0).clamp(0.03, 0.97);
+        let white_height = rect.height() * white_ratio;
+        let white_rect = egui::Rect::from_min_max(
+            egui::pos2(rect.left(), rect.bottom() - white_height),
+            rect.right_bottom(),
+        );
+        painter.rect_filled(white_rect, 3.0, egui::Color32::from_rgb(235, 235, 225));
+        painter.rect_stroke(
+            rect,
+            3.0,
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(90, 90, 90)),
+            egui::StrokeKind::Outside,
+        );
+        painter.text(
+            rect.center_bottom() + egui::vec2(0.0, 18.0),
+            egui::Align2::CENTER_CENTER,
+            format_cp_value(score_cp),
+            egui::FontId::monospace(12.0),
+            egui::Color32::from_rgb(190, 190, 190),
+        );
+    }
+
     fn show_board(&mut self, ui: &mut egui::Ui) {
         ui.vertical(|ui| {
             let display_position = self.display_position();
@@ -2572,57 +2725,81 @@ impl eframe::App for RChessGui {
         self.show_top_panel(ui);
         ui.separator();
 
-        let total_width = ui.available_width().max(720.0);
-        let total_height = ui.available_height().max(520.0);
-        let gap = 6.0;
-        let left_width = if total_width < 980.0 { 205.0 } else { 230.0 };
-        let right_width = if total_width < 980.0 { 260.0 } else { 320.0 };
-        let board_width = (total_width - left_width - right_width - gap * 2.0).max(360.0);
+        let available = ui.available_size_before_wrap();
+        let available = egui::vec2(available.x.max(640.0), available.y.max(420.0));
+        let (root_rect, _) = ui.allocate_exact_size(available, egui::Sense::hover());
 
-        ui.horizontal_top(|ui| {
-            ui.allocate_ui(egui::vec2(left_width, total_height), |ui| {
-                ui.set_width(left_width);
-                ui.set_min_width(left_width);
-                ui.set_max_width(left_width);
-                ui.set_clip_rect(ui.max_rect());
-                egui::Frame::group(ui.style()).show(ui, |ui| {
-                    ui.set_width(left_width - 12.0);
-                    egui::ScrollArea::vertical()
-                        .id_salt("left_panel_scroll")
-                        .max_height(total_height)
-                        .show(ui, |ui| self.show_left_panel(ui));
-                });
+        let gap = 8.0;
+        let root_width = root_rect.width();
+        let root_height = root_rect.height();
+        let mut left_width = if root_width >= 980.0 { 220.0 } else { 190.0 };
+        let mut right_width = if root_width >= 1180.0 {
+            340.0
+        } else if root_width >= 1000.0 {
+            300.0
+        } else if root_width >= 860.0 {
+            240.0
+        } else {
+            0.0
+        };
+        let min_center_width = 360.0;
+        if root_width - left_width - right_width - gap * 2.0 < min_center_width {
+            right_width = (root_width - left_width - gap * 2.0 - min_center_width)
+                .max(0.0)
+                .min(right_width);
+        }
+        if root_width - left_width - right_width - gap * 2.0 < min_center_width {
+            left_width = (root_width - right_width - gap * 2.0 - min_center_width)
+                .max(150.0)
+                .min(left_width);
+        }
+        let center_width = (root_width - left_width - right_width - gap * 2.0).max(0.0);
+
+        let left_rect = egui::Rect::from_min_size(
+            root_rect.left_top(),
+            egui::vec2(left_width, root_height),
+        );
+        let center_rect = egui::Rect::from_min_size(
+            egui::pos2(left_rect.right() + gap, root_rect.top()),
+            egui::vec2(center_width, root_height),
+        );
+        let right_rect = if right_width > 1.0 {
+            Some(egui::Rect::from_min_size(
+                egui::pos2(center_rect.right() + gap, root_rect.top()),
+                egui::vec2(right_width, root_height),
+            ))
+        } else {
+            None
+        };
+
+        ui.allocate_ui_at_rect(left_rect, |ui| {
+            ui.set_clip_rect(left_rect);
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.set_width((left_width - 12.0).max(120.0));
+                egui::ScrollArea::vertical()
+                    .id_salt("left_panel_scroll_fixed")
+                    .max_height(root_height - 8.0)
+                    .show(ui, |ui| self.show_left_panel(ui));
             });
+        });
 
-            ui.add_space(gap);
+        ui.allocate_ui_at_rect(center_rect, |ui| {
+            ui.set_clip_rect(center_rect);
+            self.show_center_board_panel(ui, center_rect);
+        });
 
-            ui.allocate_ui(egui::vec2(board_width, total_height), |ui| {
-                ui.set_width(board_width);
-                ui.set_min_width(board_width);
-                ui.set_max_width(board_width);
-                ui.set_clip_rect(ui.max_rect());
+        if let Some(right_rect) = right_rect {
+            ui.allocate_ui_at_rect(right_rect, |ui| {
+                ui.set_clip_rect(right_rect);
                 egui::Frame::group(ui.style()).show(ui, |ui| {
-                    ui.set_width(board_width - 12.0);
-                    self.show_board(ui);
-                });
-            });
-
-            ui.add_space(gap);
-
-            ui.allocate_ui(egui::vec2(right_width, total_height), |ui| {
-                ui.set_width(right_width);
-                ui.set_min_width(right_width);
-                ui.set_max_width(right_width);
-                ui.set_clip_rect(ui.max_rect());
-                egui::Frame::group(ui.style()).show(ui, |ui| {
-                    ui.set_width(right_width - 12.0);
+                    ui.set_width((right_width - 12.0).max(140.0));
                     egui::ScrollArea::vertical()
-                        .id_salt("right_workspace_scroll")
-                        .max_height(total_height)
+                        .id_salt("right_workspace_scroll_fixed")
+                        .max_height(root_height - 8.0)
                         .show(ui, |ui| self.show_side_panel(ui));
                 });
             });
-        });
+        }
 
         self.show_promotion_dialog(ui.ctx());
 

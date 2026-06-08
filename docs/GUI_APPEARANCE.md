@@ -91,3 +91,9 @@ left controls | eval bar + board | workspace
 Каждая колонка получает фиксированную ширину в рамках текущего окна, свой clip rect и внутреннюю вертикальную прокрутку. Доска рисуется только внутри центральной области, а FEN под доской вынесен в горизонтальный скролл, чтобы длинная строка не ломала раскладку.
 
 Главное правило для следующих GUI-патчей: новые панели анализа, матчей, логов и настроек не должны увеличивать ширину центральной области и не должны располагаться в одной строке с доской.
+
+## Layout hardening note
+
+The board is now drawn in a fixed center viewport. The side panels may scroll internally, but they must not be allowed to resize the board out of the visible area. The evaluation bar belongs to the same center viewport as the board.
+
+This is intentional: visual customization is allowed to change colors and glyphs, not the basic visibility contract of the board.

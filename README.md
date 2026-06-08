@@ -206,3 +206,8 @@ GUI now separates the actual game history from the currently displayed ply. The 
 A compact evaluation bar is drawn next to the board. If analysis data exists for the displayed ply, the bar uses that analysed score converted to White perspective. Otherwise it falls back to the internal deterministic static evaluation. This is only a visual guide, not a replacement for full search.
 
 The engine resource controls are now active for the internal `rchess` backend. `deterministic_multithread` enables deterministic root-splitting, `max_threads` limits worker count, `granularity` controls root chunk size, and `Hash` allocates the shared atomic transposition table. External UCI engines are not configured through these project-specific controls yet.
+
+
+## GUI layout stability
+
+The current GUI treats the chessboard as a fixed central viewport: left and right workspaces scroll internally and must not push the board out of view. Board appearance customization remains limited to colors and piece glyph presets until the layout is stable enough for image/SVG piece assets.
