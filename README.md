@@ -124,16 +124,17 @@ src/pgn.rs
 - [`docs/GUI_MVP.md`](docs/GUI_MVP.md) — текущее состояние GUI MVP.
 - [`docs/PGN.md`](docs/PGN.md) — текущий PGN/SAN-слой.
 - [`docs/ENGINE_BACKENDS.md`](docs/ENGINE_BACKENDS.md) — подключение внешних UCI-движков, Stockfish 10 и будущий engine-vs-engine режим.
+- [`docs/ENGINE_MATCH.md`](docs/ENGINE_MATCH.md) — задел под матч двух UCI-движков.
 - [`docs/CORE_TESTING.md`](docs/CORE_TESTING.md) — что сейчас проверяется в ядре правил.
 
 ## Дальше
 
 Ближайший разумный порядок разработки:
 
-1. Продолжать добивать надёжность ядра: больше `perft divide`-позиций, отдельные edge-case тесты для pinned pieces, discovered check, double check, castling rights и halfmove clock.
+1. Продолжать добивать надёжность ядра: depth 3 для выбранных `perft divide`-позиций, underpromotion, дополнительные en passant cases и PGN-неоднозначности.
 2. Улучшить силу: transposition table, killer/history move ordering, iterative deepening, нормальный time control.
 3. Улучшить GUI: файловый диалог вместо ручного пути, undo/redo, панель legal moves, вывод engine info и более аккуратная нотация истории.
-4. Подготовить engine-vs-engine режим: два UCI-слота, контроллер партии, PGN-лог, ограничения по глубине/времени.
+4. Довести engine-vs-engine до запуска двух реальных UCI-процессов из GUI, используя `src/matchplay.rs` как контроллер партии.
 5. Начать выносить методики поиска в явные модули, чтобы потом можно было сравнивать и комбинировать стратегии.
 
 ## Rust GUI MVP
@@ -153,7 +154,7 @@ rchess-gui window  <->  UCI child process  <->  engine core
 MVP умеет:
 
 - показывать доску;
-- выбирать фигуру кликом или drag-and-drop;
+- выбирать фигуру кликом или полноценным drag-and-drop;
 - подсвечивать доступные ходы;
 - делать легальные ходы;
 - автоматически отвечать ходом движка;
@@ -171,3 +172,8 @@ MVP умеет:
 ### Первые исправления GUI
 
 После MVP доска в GUI переведена с сетки кнопок на ручную отрисовку через `egui::Painter`. Это исправляет визуальное смешение цвета фигур, убирает предупреждения `egui` о повторном использовании `ScrollArea` id, добавляет координаты на доску и делает список ходов компактнее.
+
+
+## Engine-vs-engine foundation
+
+В библиотеке появился `src/matchplay.rs`: небольшой контроллер для будущего режима `engine vs engine`. Он хранит два UCI-слота, текущую позицию, историю ходов, PGN-лог и лимит поиска активного движка. Полноценный запуск двух процессов из GUI ещё не включён, но модель партии уже отделена от интерфейса.

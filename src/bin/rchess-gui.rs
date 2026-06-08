@@ -55,6 +55,7 @@ struct RChessGui {
     selected: Option<u8>,
     selected_moves: Vec<ChessMove>,
     dragging_from: Option<u8>,
+    drag_pointer: Option<egui::Pos2>,
     promotion_request: Option<PromotionRequest>,
     played_moves: Vec<ChessMove>,
     player_color: Color,
@@ -98,6 +99,7 @@ impl RChessGui {
             selected: None,
             selected_moves: Vec::new(),
             dragging_from: None,
+            drag_pointer: None,
             promotion_request: None,
             played_moves: Vec::new(),
             player_color: Color::White,
@@ -126,6 +128,7 @@ impl RChessGui {
         self.selected = None;
         self.selected_moves.clear();
         self.dragging_from = None;
+        self.drag_pointer = None;
         self.promotion_request = None;
         self.played_moves.clear();
         self.pgn_text.clear();
@@ -148,6 +151,7 @@ impl RChessGui {
                 self.selected = None;
                 self.selected_moves.clear();
                 self.dragging_from = None;
+                self.drag_pointer = None;
                 self.promotion_request = None;
                 self.played_moves.clear();
                 self.pending_engine = false;
@@ -224,6 +228,7 @@ impl RChessGui {
                 self.selected = None;
                 self.selected_moves.clear();
                 self.dragging_from = None;
+                self.drag_pointer = None;
                 self.promotion_request = None;
                 self.pending_engine = false;
                 self.engine_status = format!("PGN loaded, result {}", game.result);
@@ -300,6 +305,7 @@ impl RChessGui {
         self.selected = None;
         self.selected_moves.clear();
         self.dragging_from = None;
+        self.drag_pointer = None;
     }
 
     fn should_auto_engine_move(&self) -> bool {
@@ -823,27 +829,37 @@ impl RChessGui {
                     egui::Sense::click_and_drag(),
                 );
 
-                self.paint_board(ui, rect);
-
                 if response.drag_started() {
                     if let Some(pointer_pos) = response.interact_pointer_pos() {
                         if let Some(square) = pointer_to_square(rect, pointer_pos, self.flipped) {
                             if self.select_piece(square) {
                                 self.dragging_from = Some(square);
+                                self.drag_pointer = Some(pointer_pos);
                             }
                         }
                     }
                 }
 
+                if self.dragging_from.is_some() {
+                    if let Some(pointer_pos) = response.interact_pointer_pos() {
+                        self.drag_pointer = Some(pointer_pos);
+                    }
+                }
+
+                self.paint_board(ui, rect);
+
                 if response.drag_stopped() {
                     if self.dragging_from.is_some() {
-                        if let Some(pointer_pos) = response.interact_pointer_pos() {
+                        if let Some(pointer_pos) = self.drag_pointer.or_else(|| response.interact_pointer_pos()) {
                             if let Some(square) = pointer_to_square(rect, pointer_pos, self.flipped) {
                                 self.try_apply_selected_to(square);
+                            } else {
+                                self.clear_selection();
                             }
                         }
                     }
                     self.dragging_from = None;
+                    self.drag_pointer = None;
                 } else if response.clicked() {
                     if let Some(pointer_pos) = response.interact_pointer_pos() {
                         if let Some(square) = pointer_to_square(rect, pointer_pos, self.flipped) {
@@ -864,6 +880,9 @@ impl RChessGui {
         let selected = self.selected;
         let legal_targets: Vec<u8> = self.selected_moves.iter().map(|chess_move| chess_move.to).collect();
         let check_square = self.checked_king_square();
+        let drag_target = self
+            .drag_pointer
+            .and_then(|pointer| pointer_to_square(rect, pointer, self.flipped));
 
         for row in 0..8 {
             for col in 0..8 {
@@ -885,6 +904,8 @@ impl RChessGui {
                     fill = egui::Color32::from_rgb(175, 80, 70);
                 } else if selected == Some(square) {
                     fill = egui::Color32::from_rgb(190, 170, 80);
+                } else if self.dragging_from.is_some() && drag_target == Some(square) {
+                    fill = egui::Color32::from_rgb(165, 150, 95);
                 }
 
                 painter.rect_filled(square_rect, 0.0, fill);
@@ -906,43 +927,9 @@ impl RChessGui {
                     }
                 }
 
-                if let Some(piece) = self.position.piece_at(square) {
-                    let glyph = piece.unicode().to_string();
-                    let font = egui::FontId::proportional(square_size * 0.66);
-                    let center = square_rect.center();
-                    match piece.color {
-                        Color::White => {
-                            painter.text(
-                                center + egui::vec2(1.4, 1.4),
-                                egui::Align2::CENTER_CENTER,
-                                &glyph,
-                                font.clone(),
-                                egui::Color32::from_rgb(25, 25, 25),
-                            );
-                            painter.text(
-                                center,
-                                egui::Align2::CENTER_CENTER,
-                                glyph,
-                                font,
-                                egui::Color32::from_rgb(245, 245, 235),
-                            );
-                        }
-                        Color::Black => {
-                            painter.text(
-                                center + egui::vec2(1.2, 1.2),
-                                egui::Align2::CENTER_CENTER,
-                                &glyph,
-                                font.clone(),
-                                egui::Color32::from_rgb(230, 220, 200),
-                            );
-                            painter.text(
-                                center,
-                                egui::Align2::CENTER_CENTER,
-                                glyph,
-                                font,
-                                egui::Color32::from_rgb(15, 15, 15),
-                            );
-                        }
+                if self.dragging_from != Some(square) {
+                    if let Some(piece) = self.position.piece_at(square) {
+                        self.paint_piece(&painter, piece, square_rect.center(), square_size);
                     }
                 }
 
@@ -956,6 +943,62 @@ impl RChessGui {
             egui::Stroke::new(1.0, egui::Color32::from_rgb(40, 40, 40)),
             egui::StrokeKind::Outside,
         );
+
+        if let (Some(from), Some(pointer)) = (self.dragging_from, self.drag_pointer) {
+            if let Some(piece) = self.position.piece_at(from) {
+                painter.circle_filled(
+                    pointer,
+                    square_size * 0.42,
+                    egui::Color32::from_rgba_premultiplied(240, 230, 205, 40),
+                );
+                self.paint_piece(&painter, piece, pointer, square_size);
+            }
+        }
+    }
+
+    fn paint_piece(
+        &self,
+        painter: &egui::Painter,
+        piece: rchess::chess::Piece,
+        center: egui::Pos2,
+        square_size: f32,
+    ) {
+        let glyph = piece.unicode().to_string();
+        let font = egui::FontId::proportional(square_size * 0.66);
+        match piece.color {
+            Color::White => {
+                painter.text(
+                    center + egui::vec2(1.4, 1.4),
+                    egui::Align2::CENTER_CENTER,
+                    &glyph,
+                    font.clone(),
+                    egui::Color32::from_rgb(25, 25, 25),
+                );
+                painter.text(
+                    center,
+                    egui::Align2::CENTER_CENTER,
+                    glyph,
+                    font,
+                    egui::Color32::from_rgb(245, 245, 235),
+                );
+            }
+            Color::Black => {
+                painter.text(
+                    center + egui::vec2(1.2, 1.2),
+                    egui::Align2::CENTER_CENTER,
+                    &glyph,
+                    font.clone(),
+                    egui::Color32::from_rgb(230, 220, 200),
+                );
+                painter.text(
+                    center,
+                    egui::Align2::CENTER_CENTER,
+                    glyph,
+                    font,
+                    egui::Color32::from_rgb(15, 15, 15),
+                );
+            }
+        }
     }
 
     fn paint_square_coordinates(
