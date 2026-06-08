@@ -1,91 +1,84 @@
-# ♟️ Chess Engine in Rust 🦀
+# rchess
 
-This project is a chess engine implemented in Rust. It provides the core logic for playing chess, including board representation, move generation, move validation, and an AI engine for playing against the computer. The engine is designed to be modular and extensible, allowing for future improvements and enhancements.
+`rchess` — минимальный шахматный движок на Rust. Текущий этап заменяет старый прототип с демонстрационным кодом и случайным выбором хода на рабочее ядро: FEN, генератор легальных ходов, применение ходов, perft-проверки, простая оценка позиции, alpha-beta поиск и UCI-интерфейс.
 
-##  Key Features
+## Что уже есть
 
-- **Board Representation:** Uses a `HashMap` to efficiently represent the chessboard and piece positions.
-- **Move Generation:** Generates all legal moves for a given player using the chess rules.
-- **Move Validation:** Validates the legality of moves based on chess rules for each piece type.
-- **AI Engine:** Includes an AI engine that can make moves (currently a placeholder with random move selection, but designed for future implementation of Minimax or Alpha-Beta pruning).
-- **PGN Parsing:** Supports parsing and serializing chess games in Portable Game Notation (PGN) format.
-- **Game State Management:** Manages the overall game state, including move history and game status.
-- **Transposition Table:** Caches evaluation results to improve search efficiency.
+- Доска 8x8 с внутренней индексацией `a1 = 0`.
+- Разбор и вывод FEN.
+- Генерация легальных ходов с фильтрацией шаха своему королю.
+- Пешечные превращения, рокировка, взятие на проходе.
+- Определение шаха, мата и пата.
+- `perft` для проверки генератора ходов.
+- Поиск лучшего хода: negamax + alpha-beta + quiescence на взятиях.
+- Простая статическая оценка: материал, центр, развитие пешек, пара слонов.
+- UCI-протокол для подключения к GUI вроде Cute Chess, Arena, Banksia и другим.
+- Без внешних зависимостей.
 
-##  Tech Stack
+## Команды
 
-*   **Language:** Rust 
-*   **Data Structures:** `HashMap` (for board representation and transposition table)
-*   **AI:** (Placeholder for Minimax/Alpha-Beta pruning)
-*   **Random Number Generation:** `rand` crate
-*   **Game Logic:** Custom modules for game rules, board representation, and move generation.
-*   **PGN Parsing:** Custom implementation (likely using Rust's standard library string manipulation)
+Запуск как UCI-движка:
 
-##  Getting Started
-
-These instructions will get you a copy of the project up and running on your local machine for development and testing purposes.
-
-### Prerequisites
-
-*   Rust toolchain installed (`rustc`, `cargo`) - [https://www.rust-lang.org/tools/install](https://www.rust-lang.org/tools/install)
-
-### Installation
-
-1.  Clone the repository:
-
-    ```bash
-    git clone <repository_url>
-    cd chess-engine-rust
-    ```
-
-2.  Build the project:
-
-    ```bash
-    cargo build
-    ```
-
-### Running Locally
-
-1.  Run the main application:
-
-    ```bash
-    cargo run
-    ```
-
-    This will start the chess game in PC vs PC mode and run it for a fixed number of moves, printing the board state after each move.
-
-##  Usage
-
-The `main.rs` file sets up the game and runs the game loop. You can modify the `main.rs` file to change the game mode, enable/disable modules, or customize the game settings.
-
-```rust
-// Example from src/main.rs
-fn main() {
-    let mut b = Board::init_by_default();
-    let mut g = Game::new(b);
-    g.gamemode = Gamemode::PCvsPC;
-    g.start();
-
-    let mut eng = Engine::new();
-
-    for _i in 0..TOTAL_MOVES {
-        eng.make_move(&mut g);
-        g.board.display();
-    }
-}
+```bash
+cargo run --release
 ```
 
-##  Project Structure
+Проверка генератора ходов:
 
+```bash
+cargo run --release -- perft 3
 ```
-chess-engine-rust/
-├── src/
-│   ├── main.rs         # Entry point of the application
-│   ├── engine.rs       # AI engine implementation
-│   ├── game.rs         # Core game logic and data structures
-│   ├── rules.rs        # Chess rules implementation
-│   └── parser.rs       # PGN parsing and serialization
-├── Cargo.toml      # Project dependencies and metadata
-├── Cargo.lock      # Dependency lock file
-└── README.md       # This file
+
+Ожидаемые значения из стартовой позиции:
+
+```text
+depth 1 = 20
+depth 2 = 400
+depth 3 = 8902
 ```
+
+Получить лучший ход из стартовой позиции:
+
+```bash
+cargo run --release -- bestmove 4
+```
+
+Проверить разбор FEN:
+
+```bash
+cargo run --release -- fen "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+```
+
+Тесты:
+
+```bash
+cargo test
+```
+
+## UCI-минимум
+
+Поддерживаются команды:
+
+- `uci`
+- `isready`
+- `ucinewgame`
+- `setoption name Depth value N`
+- `position startpos [moves ...]`
+- `position fen <fen> [moves ...]`
+- `go depth N`
+- `perft N`
+- `d`
+- `quit`
+
+## Что вычищено
+
+Старые модули с частично завершённой логикой удалены из сборки. В них были `unimplemented!()`, `todo!()`, протекающие строки через `Box::leak`, случайный выбор хода вместо поиска и тестовый `main.rs`. Новый код собран вокруг одного простого ядра и одного интерфейса к нему.
+
+## Дальше
+
+Ближайший разумный порядок разработки:
+
+1. Добить надёжность ядра: больше `perft`-позиций, тесты на рокировку, en passant, promotion, мат и пат.
+2. Улучшить силу: transposition table, killer/history move ordering, iterative deepening, нормальный time control.
+3. Сделать чистый Rust GUI отдельной фичей, лучше через `egui/eframe`, при этом оставить UCI как стабильную границу между ядром и интерфейсом.
+4. Добавить PGN/SAN только после стабилизации правил и поиска.
