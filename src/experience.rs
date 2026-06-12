@@ -21,8 +21,8 @@ impl Default for ExperienceConfig {
         Self {
             enabled: false,
             path: "rchess_experience.rxp".to_string(),
-            min_games: 2,
-            score_tolerance_cp: 25,
+            min_games: 1,
+            score_tolerance_cp: 80,
         }
     }
 }
@@ -49,6 +49,8 @@ pub struct ExperienceRecord {
     pub loss_samples: u32,
     pub total_eval_error_cp: i64,
     pub eval_error_samples: u32,
+    pub total_terminal_loss_cp: i64,
+    pub terminal_loss_samples: u32,
 }
 
 impl ExperienceRecord {
@@ -68,16 +70,25 @@ impl ExperienceRecord {
         }
     }
 
+    pub fn average_terminal_loss_cp(self) -> Option<i32> {
+        if self.terminal_loss_samples == 0 {
+            None
+        } else {
+            Some((self.total_terminal_loss_cp / self.terminal_loss_samples as i64) as i32)
+        }
+    }
+
     pub fn experience_score(self) -> i64 {
         let result_part = self.wins as i64 * 1_000 + self.draws as i64 * 120 - self.losses as i64 * 1_000;
         let loss_penalty = self.average_loss_cp().unwrap_or(0).max(0).min(3_000) as i64;
         let eval_error_penalty = self.average_eval_error_cp().unwrap_or(0).abs().min(3_000) as i64 / 4;
-        result_part - loss_penalty - eval_error_penalty
+        let terminal_penalty = self.average_terminal_loss_cp().unwrap_or(0).max(0).min(3_000) as i64;
+        result_part - loss_penalty - eval_error_penalty - terminal_penalty
     }
 
     pub fn compact_summary(self) -> String {
         format!(
-            "games={} W/D/L/U={}/{}/{}/{} avg_loss={} exp_score={}",
+            "games={} W/D/L/U={}/{}/{}/{} avg_loss={} avg_terminal_loss={} exp_score={}",
             self.games,
             self.wins,
             self.draws,
@@ -86,11 +97,14 @@ impl ExperienceRecord {
             self.average_loss_cp()
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "-".to_string()),
+            self.average_terminal_loss_cp()
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string()),
             self.experience_score()
         )
     }
 
-    fn add_sample(&mut self, result: MoveResult, loss_cp: Option<i32>, eval_error_cp: Option<i32>) {
+    fn add_sample(&mut self, result: MoveResult, loss_cp: Option<i32>, eval_error_cp: Option<i32>, terminal_loss_cp: Option<i32>) {
         self.games = self.games.saturating_add(1);
         match result {
             MoveResult::Win => self.wins = self.wins.saturating_add(1),
@@ -105,6 +119,10 @@ impl ExperienceRecord {
         if let Some(error) = eval_error_cp {
             self.total_eval_error_cp += error.abs() as i64;
             self.eval_error_samples = self.eval_error_samples.saturating_add(1);
+        }
+        if let Some(loss) = terminal_loss_cp {
+            self.total_terminal_loss_cp += loss.max(0) as i64;
+            self.terminal_loss_samples = self.terminal_loss_samples.saturating_add(1);
         }
     }
 }
@@ -172,16 +190,24 @@ impl ExperienceBook {
         let threshold = best.score.saturating_sub(score_tolerance_cp.max(0));
         let mut best_experience: Option<ExperienceDecision> = None;
 
+        let considered_candidates = candidates
+            .iter()
+            .filter(|item| item.score >= threshold)
+            .count();
+
         for candidate in candidates.iter().copied() {
             if candidate.score < threshold {
                 continue;
             }
-            let Some(record) = self.record_for(&key, candidate.chess_move) else {
-                continue;
+            let stored_record = self.record_for(&key, candidate.chess_move);
+            let record_is_known = stored_record
+                .map(|record| record.games >= min_games.max(1))
+                .unwrap_or(false);
+            let record = if record_is_known {
+                stored_record.unwrap_or_default()
+            } else {
+                ExperienceRecord::default()
             };
-            if record.games < min_games.max(1) {
-                continue;
-            }
             let decision = ExperienceDecision {
                 key: key.clone(),
                 base_move: best.chess_move,
@@ -189,23 +215,21 @@ impl ExperienceBook {
                 chosen_move: candidate.chess_move,
                 chosen_score: candidate.score,
                 chosen_root_index: candidate.root_index,
-                considered_candidates: candidates
-                    .iter()
-                    .filter(|item| item.score >= threshold)
-                    .count(),
+                considered_candidates,
                 record,
+                record_is_known,
             };
             if experience_decision_is_better(&decision, best_experience.as_ref()) {
                 best_experience = Some(decision);
             }
         }
-        best_experience.filter(|decision| decision.chosen_move != best.chess_move || decision.record.games > 0)
+        best_experience.filter(|decision| decision.chosen_move != best.chess_move || decision.record_is_known)
     }
 
     fn add_sample(&mut self, sample: ExperienceSample) {
         let key = (sample.key, sample.chess_move);
         let record = self.records.entry(key).or_default();
-        record.add_sample(sample.result, sample.loss_cp, sample.eval_error_cp);
+        record.add_sample(sample.result, sample.loss_cp, sample.eval_error_cp, sample.terminal_loss_cp);
     }
 
     fn merge(&mut self, other: ExperienceBook) {
@@ -220,6 +244,8 @@ impl ExperienceBook {
             target.loss_samples = target.loss_samples.saturating_add(record.loss_samples);
             target.total_eval_error_cp = target.total_eval_error_cp.saturating_add(record.total_eval_error_cp);
             target.eval_error_samples = target.eval_error_samples.saturating_add(record.eval_error_samples);
+            target.total_terminal_loss_cp = target.total_terminal_loss_cp.saturating_add(record.total_terminal_loss_cp);
+            target.terminal_loss_samples = target.terminal_loss_samples.saturating_add(record.terminal_loss_samples);
         }
     }
 }
@@ -234,6 +260,7 @@ pub struct ExperienceDecision {
     pub chosen_root_index: usize,
     pub considered_candidates: usize,
     pub record: ExperienceRecord,
+    pub record_is_known: bool,
 }
 
 impl ExperienceDecision {
@@ -244,7 +271,7 @@ impl ExperienceDecision {
             self.base_move.to_uci(),
             self.chosen_score,
             self.base_score,
-            self.record.compact_summary(),
+            if self.record_is_known { self.record.compact_summary() } else { "no prior sample for chosen move".to_string() },
             self.considered_candidates
         )
     }
@@ -285,6 +312,7 @@ struct ExperienceSample {
     result: MoveResult,
     loss_cp: Option<i32>,
     eval_error_cp: Option<i32>,
+    terminal_loss_cp: Option<i32>,
 }
 
 impl ExperienceSample {
@@ -300,12 +328,16 @@ impl ExperienceSample {
         let eval_error_cp = fields
             .get("eval_error_cp")
             .and_then(|value| parse_optional_i32(value));
+        let terminal_loss_cp = fields
+            .get("terminal_loss_cp")
+            .and_then(|value| parse_optional_i32(value));
         Some(Self {
             key,
             chess_move,
             result,
             loss_cp,
             eval_error_cp,
+            terminal_loss_cp,
         })
     }
 }
@@ -336,6 +368,7 @@ pub fn append_game_to_experience_book(
         .open(path)
         .map_err(|error| format!("experience book append error: {error}"))?;
 
+    let terminal = terminal_summary(start_fen.trim(), moves, result);
     let mut position = Position::from_fen(start_fen.trim())?;
     writeln!(
         file,
@@ -359,10 +392,12 @@ pub fn append_game_to_experience_book(
             .filter(|item| item.uci == chess_move.to_uci() && item.before_fen == before.to_fen());
         let detail = move_detail(analyzed_item, &before, &position);
         let mover_result = result_for_mover(result, side);
-        let eval_error_cp = detail.loss_cp;
+        let terminal_detail = terminal_move_detail(terminal.as_ref(), side, index + 1, moves.len());
+        let eval_error_cp = combine_eval_error(detail.loss_cp, terminal_detail.loss_cp);
+        let reason = combine_reason(&detail.reason, terminal_detail.reason.as_deref());
         writeln!(
             file,
-            "move\tply={}\tside={}\tkey={}\tfen={}\tmove={}\tsan={}\tresult={}\tbefore_cp={}\tafter_cp={}\tloss_cp={}\taccuracy={}\teval_error_cp={}\treason={}",
+            "move	ply={}	side={}	key={}	fen={}	move={}	san={}	result={}	before_cp={}	after_cp={}	loss_cp={}	accuracy={}	eval_error_cp={}	terminal_loss_cp={}	terminal_plies={}	terminal_reason={}	reason={}",
             index + 1,
             color_code(side),
             field(&key),
@@ -378,7 +413,10 @@ pub fn append_game_to_experience_book(
                 .map(|value| format!("{value:.1}"))
                 .unwrap_or_else(|| "-".to_string()),
             opt_i32(eval_error_cp),
-            field(&detail.reason),
+            opt_i32(terminal_detail.loss_cp),
+            opt_usize(terminal_detail.plies_to_terminal),
+            field(terminal_detail.reason.as_deref().unwrap_or("-")),
+            field(&reason),
         )
         .map_err(|error| format!("experience book write error: {error}"))?;
         written += 1;
@@ -386,6 +424,90 @@ pub fn append_game_to_experience_book(
     writeln!(file, "endgame\tmoves={written}")
         .map_err(|error| format!("experience book write error: {error}"))?;
     Ok(written)
+}
+
+
+#[derive(Clone, Debug)]
+struct TerminalSummary {
+    losing_side: Option<Color>,
+    reason: String,
+}
+
+#[derive(Clone, Debug)]
+struct TerminalMoveDetail {
+    loss_cp: Option<i32>,
+    plies_to_terminal: Option<usize>,
+    reason: Option<String>,
+}
+
+fn terminal_summary(start_fen: &str, moves: &[ChessMove], result: &str) -> Option<TerminalSummary> {
+    let losing_side = losing_side_from_result(result)?;
+    let mut position = Position::from_fen(start_fen).ok()?;
+    for chess_move in moves.iter().copied() {
+        position.make_legal_move(chess_move).ok()?;
+    }
+    let reason = if position.is_checkmate() {
+        "checkmate"
+    } else if position.is_fifty_move_rule_draw() {
+        "50-move-rule"
+    } else if position.is_stalemate() {
+        "stalemate"
+    } else {
+        "game-result"
+    };
+    Some(TerminalSummary {
+        losing_side: Some(losing_side),
+        reason: reason.to_string(),
+    })
+}
+
+fn terminal_move_detail(
+    terminal: Option<&TerminalSummary>,
+    side: Color,
+    ply: usize,
+    total_plies: usize,
+) -> TerminalMoveDetail {
+    let Some(terminal) = terminal else {
+        return TerminalMoveDetail { loss_cp: None, plies_to_terminal: None, reason: None };
+    };
+    if terminal.losing_side != Some(side) || terminal.reason == "stalemate" || terminal.reason == "50-move-rule" {
+        return TerminalMoveDetail { loss_cp: None, plies_to_terminal: None, reason: None };
+    }
+    let plies_to_terminal = total_plies.saturating_sub(ply).saturating_add(1);
+    let loss_cp = terminal_backprop_penalty(&terminal.reason, plies_to_terminal);
+    TerminalMoveDetail {
+        loss_cp: Some(loss_cp),
+        plies_to_terminal: Some(plies_to_terminal),
+        reason: Some(format!("terminal-{}-backprop", terminal.reason)),
+    }
+}
+
+fn terminal_backprop_penalty(reason: &str, plies_to_terminal: usize) -> i32 {
+    let base = if reason == "checkmate" { 1_400 } else { 900 };
+    match plies_to_terminal {
+        0..=8 => base,
+        9..=16 => base * 3 / 4,
+        17..=24 => base / 2,
+        25..=40 => base / 3,
+        41..=64 => base / 5,
+        _ => base / 8,
+    }
+}
+
+fn combine_eval_error(loss_cp: Option<i32>, terminal_loss_cp: Option<i32>) -> Option<i32> {
+    match (loss_cp, terminal_loss_cp) {
+        (Some(loss), Some(terminal)) => Some(loss.saturating_add(terminal)),
+        (Some(loss), None) => Some(loss),
+        (None, Some(terminal)) => Some(terminal),
+        (None, None) => None,
+    }
+}
+
+fn combine_reason(base: &str, terminal: Option<&str>) -> String {
+    match terminal {
+        Some(terminal) => format!("{base}|{terminal}"),
+        None => base.to_string(),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -489,6 +611,20 @@ fn opt_i32(value: Option<i32>) -> String {
         .unwrap_or_else(|| "-".to_string())
 }
 
+fn opt_usize(value: Option<usize>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn losing_side_from_result(result: &str) -> Option<Color> {
+    match result {
+        "1-0" => Some(Color::Black),
+        "0-1" => Some(Color::White),
+        _ => None,
+    }
+}
+
 fn result_for_mover(result: &str, side: Color) -> MoveResult {
     match (result, side) {
         ("1-0", Color::White) | ("0-1", Color::Black) => MoveResult::Win,
@@ -534,6 +670,7 @@ mod tests {
             result: MoveResult::Win,
             loss_cp: Some(0),
             eval_error_cp: Some(0),
+            terminal_loss_cp: None,
         });
         book.add_sample(ExperienceSample {
             key: position.repetition_key(),
@@ -541,6 +678,7 @@ mod tests {
             result: MoveResult::Win,
             loss_cp: Some(0),
             eval_error_cp: Some(0),
+            terminal_loss_cp: None,
         });
         let candidates = vec![
             RootCandidate { root_index: 0, chess_move: e4, score: 20 },
@@ -549,6 +687,29 @@ mod tests {
         assert!(book.choose_move(&position, &candidates, 2, 10).is_none());
         let decision = book.choose_move(&position, &candidates, 2, 20).unwrap();
         assert_eq!(decision.chosen_move, d4);
+    }
+
+    #[test]
+    fn known_bad_move_can_be_vetoed_by_unknown_close_move() {
+        let position = Position::startpos();
+        let e4 = position.parse_uci_move("e2e4").unwrap();
+        let d4 = position.parse_uci_move("d2d4").unwrap();
+        let mut book = ExperienceBook::default();
+        book.add_sample(ExperienceSample {
+            key: position.repetition_key(),
+            chess_move: e4.to_uci(),
+            result: MoveResult::Loss,
+            loss_cp: Some(0),
+            eval_error_cp: Some(0),
+            terminal_loss_cp: Some(700),
+        });
+        let candidates = vec![
+            RootCandidate { root_index: 0, chess_move: e4, score: 20 },
+            RootCandidate { root_index: 1, chess_move: d4, score: 0 },
+        ];
+        let decision = book.choose_move(&position, &candidates, 1, 30).unwrap();
+        assert_eq!(decision.chosen_move, d4);
+        assert!(!decision.record_is_known);
     }
 
     #[test]

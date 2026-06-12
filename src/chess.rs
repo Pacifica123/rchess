@@ -380,6 +380,20 @@ impl Position {
         self.halfmove_clock
     }
 
+    pub fn fullmove_number(&self) -> u32 {
+        self.fullmove_number
+    }
+
+    pub fn king_square(&self, color: Color) -> Option<u8> {
+        self.board.iter().enumerate().find_map(|(square, piece)| {
+            if *piece == Some(Piece { color, kind: PieceKind::King }) {
+                Some(square as u8)
+            } else {
+                None
+            }
+        })
+    }
+
     pub fn is_fifty_move_rule_draw(&self) -> bool {
         self.halfmove_clock >= 100 && !self.is_checkmate()
     }
@@ -836,16 +850,6 @@ impl Position {
         {
             moves.push(ChessMove::new(from, to, None));
         }
-    }
-
-    fn king_square(&self, color: Color) -> Option<u8> {
-        self.board.iter().enumerate().find_map(|(square, piece)| {
-            if *piece == Some(Piece { color, kind: PieceKind::King }) {
-                Some(square as u8)
-            } else {
-                None
-            }
-        })
     }
 
     fn is_square_attacked(&self, square: u8, by_color: Color) -> bool {

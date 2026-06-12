@@ -497,7 +497,7 @@ pub fn evaluate_white_perspective(position: &Position) -> i32 {
     if black_bishops >= 2 {
         score -= 35;
     }
-    score
+    score + strategic_opening_balance(position)
 }
 
 fn positional_bonus(kind: PieceKind, color: Color, square: u8) -> i32 {
@@ -524,6 +524,165 @@ fn positional_bonus(kind: PieceKind, color: Color, square: u8) -> i32 {
                 -center_bonus
             }
         }
+    }
+}
+
+
+fn strategic_opening_balance(position: &Position) -> i32 {
+    side_opening_score(position, Color::White) - side_opening_score(position, Color::Black)
+}
+
+fn side_opening_score(position: &Position, color: Color) -> i32 {
+    if position.fullmove_number() > 24 {
+        return 0;
+    }
+
+    let undeveloped = undeveloped_minor_count(position, color);
+    let mut score = 0;
+    score -= undeveloped * 18;
+    score -= overextended_minor_penalty(position, color, undeveloped);
+    score -= early_queen_penalty(position, color, undeveloped);
+    score -= unsafe_king_penalty(position, color, undeveloped);
+    if king_is_castled(position, color) && position.fullmove_number() <= 18 {
+        score += 30;
+    }
+    score
+}
+
+fn undeveloped_minor_count(position: &Position, color: Color) -> i32 {
+    home_minor_squares(color)
+        .iter()
+        .filter(|square| {
+            matches!(
+                position.piece_at(**square),
+                Some(piece) if piece.color == color && (piece.kind == PieceKind::Knight || piece.kind == PieceKind::Bishop)
+            )
+        })
+        .count() as i32
+}
+
+fn overextended_minor_penalty(position: &Position, color: Color, undeveloped: i32) -> i32 {
+    let mut penalty = 0;
+    let castled = king_is_castled(position, color);
+    for square in 0_u8..64 {
+        let Some(piece) = position.piece_at(square) else {
+            continue;
+        };
+        if piece.color != color || (piece.kind != PieceKind::Knight && piece.kind != PieceKind::Bishop) {
+            continue;
+        }
+        let own_rank = own_rank(square, color);
+        if own_rank >= 4 && position.fullmove_number() <= 16 {
+            penalty += 20 + undeveloped * 12;
+            if !castled {
+                penalty += 18;
+            }
+            if piece.kind == PieceKind::Knight && own_rank >= 5 {
+                penalty += 20;
+            }
+        }
+    }
+    penalty
+}
+
+fn early_queen_penalty(position: &Position, color: Color, undeveloped: i32) -> i32 {
+    if position.fullmove_number() > 18 {
+        return 0;
+    }
+    let Some(square) = queen_square(position, color) else {
+        return 0;
+    };
+    if square == home_queen_square(color) {
+        return 0;
+    }
+
+    let mut penalty = 20;
+    let own_rank = own_rank(square, color);
+    if own_rank >= 4 {
+        penalty += 35;
+    }
+    if own_rank >= 6 {
+        penalty += 70;
+    }
+    if undeveloped >= 2 {
+        penalty += undeveloped * 25;
+    }
+    if !king_is_castled(position, color) {
+        penalty += 45;
+    }
+    penalty
+}
+
+fn unsafe_king_penalty(position: &Position, color: Color, undeveloped: i32) -> i32 {
+    let Some(king) = position.king_square(color) else {
+        return 300;
+    };
+    let fullmove = position.fullmove_number();
+    let mut penalty = 0;
+    let castled = king_is_castled(position, color);
+    let file = file_of(king);
+
+    if !castled && fullmove >= 7 {
+        penalty += 25 + undeveloped * 10;
+        if (2..=5).contains(&file) {
+            penalty += 35;
+        }
+        if fullmove >= 12 {
+            penalty += 25;
+        }
+    }
+
+    if central_pawns_disrupted(position, color) && !castled {
+        penalty += 35;
+        if (2..=5).contains(&file) {
+            penalty += 35;
+        }
+    }
+
+    penalty
+}
+
+fn central_pawns_disrupted(position: &Position, color: Color) -> bool {
+    let (d_square, e_square) = match color {
+        Color::White => (11, 12),
+        Color::Black => (51, 52),
+    };
+    let d_home = position.piece_at(d_square) == Some(crate::chess::Piece { color, kind: PieceKind::Pawn });
+    let e_home = position.piece_at(e_square) == Some(crate::chess::Piece { color, kind: PieceKind::Pawn });
+    !(d_home && e_home)
+}
+
+fn queen_square(position: &Position, color: Color) -> Option<u8> {
+    (0_u8..64).find(|square| {
+        position.piece_at(*square) == Some(crate::chess::Piece { color, kind: PieceKind::Queen })
+    })
+}
+
+fn home_minor_squares(color: Color) -> [u8; 4] {
+    match color {
+        Color::White => [1, 2, 5, 6],
+        Color::Black => [57, 58, 61, 62],
+    }
+}
+
+fn home_queen_square(color: Color) -> u8 {
+    match color {
+        Color::White => 3,
+        Color::Black => 59,
+    }
+}
+
+fn king_is_castled(position: &Position, color: Color) -> bool {
+    match color {
+        Color::White => matches!(position.king_square(Color::White), Some(2 | 6)),
+        Color::Black => matches!(position.king_square(Color::Black), Some(58 | 62)),
+    }
+}
+
+fn own_rank(square: u8, color: Color) -> i32 {
+    match color {
+        Color::White => rank_of(square),
+        Color::Black => 7 - rank_of(square),
     }
 }
 

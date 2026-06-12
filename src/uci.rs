@@ -34,8 +34,8 @@ pub fn run() {
             println!("option name Hash type spin default 64 min 1 max 4096");
             println!("option name UseExperienceBook type check default false");
             println!("option name ExperienceBookPath type string default rchess_experience.rxp");
-            println!("option name ExperienceMinGames type spin default 2 min 1 max 10000");
-            println!("option name ExperienceScoreToleranceCp type spin default 25 min 0 max 1000");
+            println!("option name ExperienceMinGames type spin default 1 min 1 max 10000");
+            println!("option name ExperienceScoreToleranceCp type spin default 80 min 0 max 1000");
             println!("uciok");
         } else if line == "isready" {
             println!("readyok");
