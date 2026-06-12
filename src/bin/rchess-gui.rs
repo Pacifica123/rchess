@@ -2376,8 +2376,137 @@ impl RChessGui {
         ui.label(&self.experience_status);
     }
 
+    fn analysis_chart_points(&self) -> Vec<(usize, i32)> {
+        let Some(analysis) = &self.analysis else {
+            return Vec::new();
+        };
+        let mut points = Vec::with_capacity(analysis.items.len() + 1);
+        if let Some(first) = analysis.items.first() {
+            if let Some(score) = first.before_score_cp {
+                points.push((0, score_from_fen_side_to_move_to_white(&first.before_fen, score)));
+            }
+        }
+        for item in &analysis.items {
+            if let Some(score) = item.after_score_cp {
+                points.push((item.ply, score_from_fen_side_to_move_to_white(&item.after_fen, score)));
+            }
+        }
+        points
+    }
+
+    fn show_analysis_chart(&mut self, ui: &mut egui::Ui) {
+        let points = self.analysis_chart_points();
+        ui.label(egui::RichText::new("Evaluation dynamics").strong());
+        if points.len() < 2 {
+            ui.small("The chart appears as analysed scores arrive. It plots the evaluation after each ply from White's perspective.");
+            return;
+        }
+
+        let desired_size = egui::vec2(ui.available_width().max(260.0), 170.0);
+        let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::click());
+        let painter = ui.painter_at(rect);
+        let visuals = ui.visuals();
+        painter.rect_filled(rect, 6.0, visuals.extreme_bg_color);
+        painter.rect_stroke(
+            rect,
+            6.0,
+            egui::Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color),
+            egui::StrokeKind::Inside,
+        );
+
+        let plot_rect = rect.shrink2(egui::vec2(12.0, 14.0));
+        let max_ply = points.last().map(|(ply, _)| *ply).unwrap_or(1).max(1);
+        let max_abs_cp = points
+            .iter()
+            .map(|(_, score)| analysis_chart_clamp_cp(*score).abs())
+            .max()
+            .unwrap_or(300)
+            .clamp(300, ANALYSIS_CHART_ABS_CP_CAP);
+
+        let zero_y = analysis_chart_y(plot_rect, 0, max_abs_cp);
+        painter.line_segment(
+            [egui::pos2(plot_rect.left(), zero_y), egui::pos2(plot_rect.right(), zero_y)],
+            egui::Stroke::new(1.0, visuals.widgets.noninteractive.fg_stroke.color.gamma_multiply(0.45)),
+        );
+        let current_ply = self.history_view_ply();
+        let current_x = analysis_chart_x(plot_rect, current_ply.min(max_ply), max_ply);
+        painter.line_segment(
+            [egui::pos2(current_x, plot_rect.top()), egui::pos2(current_x, plot_rect.bottom())],
+            egui::Stroke::new(1.0, visuals.selection.stroke.color.gamma_multiply(0.8)),
+        );
+
+        let polyline: Vec<egui::Pos2> = points
+            .iter()
+            .map(|(ply, score)| {
+                egui::pos2(
+                    analysis_chart_x(plot_rect, *ply, max_ply),
+                    analysis_chart_y(plot_rect, *score, max_abs_cp),
+                )
+            })
+            .collect();
+        painter.add(egui::Shape::line(
+            polyline,
+            egui::Stroke::new(2.0, visuals.hyperlink_color),
+        ));
+
+        for (ply, score) in &points {
+            let point = egui::pos2(
+                analysis_chart_x(plot_rect, *ply, max_ply),
+                analysis_chart_y(plot_rect, *score, max_abs_cp),
+            );
+            let radius = if *ply == current_ply { 4.5 } else { 2.8 };
+            let fill = if *score >= 0 {
+                visuals.selection.bg_fill
+            } else {
+                egui::Color32::from_rgb(220, 110, 90)
+            };
+            painter.circle_filled(point, radius, fill);
+        }
+
+        let hovered = response
+            .hover_pos()
+            .map(|pointer| nearest_analysis_point(pointer, plot_rect, &points, max_ply, max_abs_cp))
+            .or_else(|| points.iter().find(|(ply, _)| *ply == current_ply).copied());
+
+        if let Some((ply, score)) = hovered {
+            let point = egui::pos2(
+                analysis_chart_x(plot_rect, ply, max_ply),
+                analysis_chart_y(plot_rect, score, max_abs_cp),
+            );
+            painter.circle_stroke(point, 6.5, egui::Stroke::new(1.0, visuals.text_color()));
+            let label = format!("ply {ply}: {}", format_eval_cp_value(score));
+            painter.text(
+                egui::pos2(plot_rect.left(), plot_rect.top() - 2.0),
+                egui::Align2::LEFT_TOP,
+                label,
+                egui::TextStyle::Small.resolve(ui.style()),
+                visuals.text_color(),
+            );
+            if response.clicked() {
+                self.navigate_history_to(ply);
+            }
+        }
+
+        painter.text(
+            egui::pos2(plot_rect.left(), plot_rect.bottom() + 2.0),
+            egui::Align2::LEFT_TOP,
+            "0",
+            egui::TextStyle::Small.resolve(ui.style()),
+            visuals.weak_text_color(),
+        );
+        painter.text(
+            egui::pos2(plot_rect.right(), plot_rect.bottom() + 2.0),
+            egui::Align2::RIGHT_TOP,
+            format!("{} plies", max_ply),
+            egui::TextStyle::Small.resolve(ui.style()),
+            visuals.weak_text_color(),
+        );
+    }
+
     fn show_analysis_panel(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Game analysis");
         ui.label(&self.analysis_status);
+        ui.small("Flow: paste or open a PGN below, then press Start analysis. If the PGN buffer is empty, the current board history is analysed instead.");
         ui.add(egui::Slider::new(&mut self.analysis_depth, 1..=8).text("Analysis depth"));
         ui.horizontal_wrapped(|ui| {
             if ui
@@ -2395,18 +2524,56 @@ impl RChessGui {
             if ui.button("Copy report").clicked() {
                 self.copy_analysis_report(ui.ctx());
             }
+            if ui.button("Use current game PGN").clicked() {
+                self.export_pgn_to_text();
+            }
         });
 
-        if let Some(analysis) = &self.analysis {
+        ui.collapsing("Analysis source (PGN)", |ui| {
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Load current PGN text").clicked() {
+                    self.load_pgn_from_text();
+                }
+                if ui.button("Open PGN path").clicked() {
+                    self.open_pgn_from_file();
+                }
+                if ui.button("Save PGN path").clicked() {
+                    self.save_pgn_to_file();
+                }
+                if ui.button("Clear PGN text").clicked() {
+                    self.pgn_text.clear();
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("PGN path");
+                ui.text_edit_singleline(&mut self.pgn_path);
+            });
+            ui.add(
+                egui::TextEdit::multiline(&mut self.pgn_text)
+                    .font(egui::TextStyle::Monospace)
+                    .desired_rows(8),
+            );
+        });
+
+        if let Some(analysis) = self.analysis.clone() {
             let done = analysis.completed_jobs();
             let total = analysis.total_jobs();
             let progress = if total == 0 { 0.0 } else { done as f32 / total as f32 };
             ui.add(egui::ProgressBar::new(progress).text(format!("{done}/{total} evals")));
             let summary = analysis.summary();
-            ui.label(format!("White accuracy: {}", format_accuracy(summary.white_accuracy)));
-            ui.label(format!("Black accuracy: {}", format_accuracy(summary.black_accuracy)));
-            ui.label(summary.verdict);
+            ui.group(|ui| {
+                ui.label(egui::RichText::new("Accuracy summary").strong());
+                ui.horizontal_wrapped(|ui| {
+                    ui.monospace(format!("White: {}", format_accuracy(summary.white_accuracy)));
+                    ui.separator();
+                    ui.monospace(format!("Black: {}", format_accuracy(summary.black_accuracy)));
+                });
+                ui.label(summary.verdict.clone());
+            });
+            ui.add_space(4.0);
+            self.show_analysis_chart(ui);
             ui.separator();
+            ui.label(egui::RichText::new("Analysed moves").strong());
             let current_view_ply = self.history_view_ply();
             let mut requested_ply = None;
             egui::ScrollArea::vertical()
@@ -3403,6 +3570,58 @@ fn color_name(color: Color) -> &'static str {
 }
 
 const GUI_MATE_SCORE_CP: i32 = 32_000;
+const ANALYSIS_CHART_ABS_CP_CAP: i32 = 1_200;
+
+fn analysis_chart_clamp_cp(score_cp: i32) -> i32 {
+    if score_cp >= GUI_MATE_SCORE_CP / 2 {
+        ANALYSIS_CHART_ABS_CP_CAP
+    } else if score_cp <= -GUI_MATE_SCORE_CP / 2 {
+        -ANALYSIS_CHART_ABS_CP_CAP
+    } else {
+        score_cp.clamp(-ANALYSIS_CHART_ABS_CP_CAP, ANALYSIS_CHART_ABS_CP_CAP)
+    }
+}
+
+fn analysis_chart_x(rect: egui::Rect, ply: usize, max_ply: usize) -> f32 {
+    if max_ply == 0 {
+        return rect.left();
+    }
+    rect.left() + rect.width() * (ply as f32 / max_ply as f32)
+}
+
+fn analysis_chart_y(rect: egui::Rect, score_cp: i32, max_abs_cp: i32) -> f32 {
+    let clamped = analysis_chart_clamp_cp(score_cp) as f32;
+    let span = max_abs_cp.max(1) as f32;
+    let normalized = (clamped / span).clamp(-1.0, 1.0);
+    rect.center().y - normalized * rect.height() * 0.5
+}
+
+fn nearest_analysis_point(
+    pointer: egui::Pos2,
+    rect: egui::Rect,
+    points: &[(usize, i32)],
+    max_ply: usize,
+    max_abs_cp: i32,
+) -> (usize, i32) {
+    points
+        .iter()
+        .copied()
+        .min_by(|(ply_a, score_a), (ply_b, score_b)| {
+            let point_a = egui::pos2(
+                analysis_chart_x(rect, *ply_a, max_ply),
+                analysis_chart_y(rect, *score_a, max_abs_cp),
+            );
+            let point_b = egui::pos2(
+                analysis_chart_x(rect, *ply_b, max_ply),
+                analysis_chart_y(rect, *score_b, max_abs_cp),
+            );
+            point_a
+                .distance_sq(pointer)
+                .partial_cmp(&point_b.distance_sq(pointer))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .unwrap_or((0, 0))
+}
 
 fn terminal_score_white(position: &Position) -> Option<i32> {
     if position.is_checkmate() {

@@ -28,6 +28,8 @@ Current actions:
 - show progress by analysed FEN count;
 - show per-move SAN, score before, score after, centipawn loss and simple accuracy;
 - show average accuracy for White and Black;
+- show an evaluation-dynamics chart below the summary;
+- let the chart and move rows drive the board history cursor by click;
 - copy a plain-text analysis report;
 - click an analysed ply to show that position on the board;
 - reuse analysed scores for the board evaluation bar.
@@ -43,10 +45,24 @@ The current analysis is shallow and deterministic. It does not yet include:
 - multi-PV;
 - time-based analysis queue;
 - cached analysis;
-- chart view;
 - saving analysis metadata into PGN comments.
 
 Those should be added as separate layers after the UI and UCI pipeline stop changing.
+
+
+## Patch: analysis source flow and evaluation chart
+
+The analysis panel now contains the full user flow directly inside `Game analysis`:
+
+1. paste a PGN into the analysis source box, or open it from a file path;
+2. optionally load that PGN into the main board/history view;
+3. press `Start analysis`;
+4. read the summary accuracy for White and Black;
+5. inspect the evaluation-dynamics chart under the summary.
+
+The chart is a deterministic line plot of the analysed evaluation after each ply, always converted to White perspective. Positive values mean White is better, negative values mean Black is better. The currently displayed board ply is highlighted in the chart, and clicking a point on the chart moves the board to that ply.
+
+Mate scores are intentionally clamped for chart drawing so that one forced mate does not flatten the rest of the game into a near-horizontal line.
 
 ## Board integration
 
