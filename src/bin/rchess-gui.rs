@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use rchess::analysis::{format_accuracy, format_cp, format_cp_value, AnalysisJob, GameAnalysis};
-use rchess::chess::{square_name, ChessMove, Color, PieceKind, Position, STARTPOS_FEN};
-use rchess::matchplay::{EngineMatchController, SearchLimit, UciEngineSlot};
+use rchess::chess::{square_name, ChessMove, Color, DrawReason, PieceKind, Position, STARTPOS_FEN};
+use rchess::matchplay::{uci_position_command_from_history, EngineMatchController, SearchLimit, UciEngineSlot};
 use rchess::pgn::{export_pgn, move_to_san, parse_pgn, position_after_moves};
 use rchess::search::evaluate_tactical_for_side_to_move;
 
@@ -546,15 +546,37 @@ impl RChessGui {
                 Color::White => "0-1".to_string(),
                 Color::Black => "1-0".to_string(),
             }
-        } else if self.position.is_stalemate() {
+        } else if self.current_draw_reason().is_some() {
             "1/2-1/2".to_string()
         } else {
             "*".to_string()
         }
     }
 
+    fn current_draw_reason(&self) -> Option<DrawReason> {
+        Position::draw_reason_from_history(&self.game_start_fen, &self.played_moves)
+            .ok()
+            .flatten()
+    }
+
+    fn current_position_command(&self) -> String {
+        uci_position_command_from_history(&self.game_start_fen, &self.played_moves)
+    }
+
+    fn draw_reason_for_ply(&self, ply: usize) -> Option<DrawReason> {
+        let clamped = ply.min(self.played_moves.len());
+        Position::draw_reason_from_history(&self.game_start_fen, &self.played_moves[..clamped])
+            .ok()
+            .flatten()
+    }
+
     fn select_square(&mut self, square: u8) {
-        if self.pending_engine || self.match_running || self.promotion_request.is_some() || !self.is_history_view_live() {
+        if self.pending_engine
+            || self.match_running
+            || self.promotion_request.is_some()
+            || !self.is_history_view_live()
+            || self.current_result() != "*"
+        {
             return;
         }
 
@@ -577,7 +599,12 @@ impl RChessGui {
     }
 
     fn select_piece(&mut self, square: u8) -> bool {
-        if self.pending_engine || self.match_running || self.promotion_request.is_some() || !self.is_history_view_live() {
+        if self.pending_engine
+            || self.match_running
+            || self.promotion_request.is_some()
+            || !self.is_history_view_live()
+            || self.current_result() != "*"
+        {
             return false;
         }
         let Some(piece) = self.position.piece_at(square) else {
@@ -637,8 +664,7 @@ impl RChessGui {
             && !self.pending_engine
             && !self.match_running
             && self.position.side_to_move() != self.player_color
-            && !self.position.is_checkmate()
-            && !self.position.is_stalemate()
+            && self.current_result() == "*"
     }
 
     fn try_apply_selected_to(&mut self, to: u8) -> bool {
@@ -817,7 +843,7 @@ impl RChessGui {
         if self.pending_engine || self.match_running {
             return;
         }
-        if self.position.is_checkmate() || self.position.is_stalemate() {
+        if self.current_result() != "*" {
             self.refresh_game_status();
             return;
         }
@@ -829,7 +855,7 @@ impl RChessGui {
         self.send_primary_engine_resource_options();
         self.pending_engine = true;
         self.engine_status = format!("Engine is thinking at depth {}", self.search_depth);
-        self.send_to_engine(&format!("position fen {}", self.position.to_fen()));
+        self.send_to_engine(&self.current_position_command());
         self.send_to_engine(&format!("go depth {}", self.search_depth));
     }
 
@@ -1473,8 +1499,8 @@ impl RChessGui {
         let side = color_name(self.position.side_to_move());
         self.game_status = if self.position.is_checkmate() {
             format!("Checkmate. {side} has no legal move")
-        } else if self.position.is_stalemate() {
-            format!("Stalemate. {side} has no legal move")
+        } else if let Some(reason) = self.current_draw_reason() {
+            format!("Draw by {}", reason.label())
         } else if self.position.is_in_check(self.position.side_to_move()) {
             format!("{side} to move, in check")
         } else {
@@ -1576,11 +1602,14 @@ impl RChessGui {
     }
 
     fn display_eval_cp_white(&self, display_position: &Position) -> i32 {
+        let ply = self.history_view_ply();
         if let Some(score) = terminal_score_white(display_position) {
             return score;
         }
+        if self.draw_reason_for_ply(ply).is_some() {
+            return 0;
+        }
 
-        let ply = self.history_view_ply();
         if let Some(score) = self.analysis_score_for_ply_white(ply) {
             return score;
         }
@@ -3268,7 +3297,7 @@ fn terminal_score_white(position: &Position) -> Option<i32> {
             Color::White => -GUI_MATE_SCORE_CP,
             Color::Black => GUI_MATE_SCORE_CP,
         })
-    } else if position.is_stalemate() {
+    } else if position.is_stalemate() || position.is_fifty_move_rule_draw() {
         Some(0)
     } else {
         None
@@ -3278,7 +3307,7 @@ fn terminal_score_white(position: &Position) -> Option<i32> {
 fn terminal_score_side_to_move(position: &Position) -> Option<i32> {
     if position.is_checkmate() {
         Some(-GUI_MATE_SCORE_CP)
-    } else if position.is_stalemate() {
+    } else if position.is_stalemate() || position.is_fifty_move_rule_draw() {
         Some(0)
     } else {
         None

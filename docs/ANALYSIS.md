@@ -74,3 +74,9 @@ When a UCI backend returns `bestmove 0000` without a score for a terminal analys
 The GUI now parses UCI `score mate N` lines and converts them into a mate-class evaluation instead of dropping the score and falling back to static material. The board bar therefore keeps mate information from Stockfish and from the internal engine.
 
 When no analysis score is available, the board bar no longer uses a purely static material/positional number. It first checks terminal positions and immediate mate-in-one for the side to move. This is intentionally small and deterministic, but it removes the most visible case where the scale looked blind one move before mate.
+
+## Patch: draw-aware live status
+
+The GUI live result and evaluation bar now treat rule-based draws as terminal for the current game history. A position with a threefold repetition or a halfmove clock of at least 100 is shown as equal and the game status reports the draw reason.
+
+This matters for long engine games: a repeated checking cycle should not stay as `*` until `Max plies`; it should become `1/2-1/2` when the third occurrence is reached.

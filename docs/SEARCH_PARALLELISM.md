@@ -73,3 +73,7 @@ The low-depth search now runs a cheap mate-in-one probe before falling back to q
 The internal engine now defaults to deterministic root splitting when the machine reports more than one hardware thread. `max_threads` is initialized from `std::thread::available_parallelism()` and remains clamped by the existing UCI option bounds. The GUI mirrors that default in its resource panel, so game analysis and internal-engine searches use the implemented parallel root layer unless the user turns it off.
 
 The UCI backend now emits `score mate N` for mate-distance scores instead of huge centipawn values. `go movetime N` is still not a real clock manager, but the internal backend maps movetime buckets to a bounded depth so engine-vs-engine matches can use rough per-side power limits without silently ignoring `movetime`.
+
+## Patch: 50-move draw in search leaves
+
+The search and tactical fallback now score positions with a halfmove clock of at least 100 as drawn unless the position is checkmate. This does not give the engine full repetition-aware search yet, because the internal search still stores only the parsed `Position`, not the whole move-history stack. It does prevent the internal evaluator from treating an already claimable 50-move draw as a normal advantage.

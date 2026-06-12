@@ -97,3 +97,20 @@ setoption name Skill Level value 0
 ```
 
 These options are sent to the corresponding child process at match startup. Internal `rchess` children still receive the project resource options (`deterministic_multithread`, `max_threads`, `granularity`, `Hash`) automatically.
+
+## Patch: draw adjudication and history-aware UCI positions
+
+Engine matches now adjudicate the two draw rules that were missing from long games:
+
+- threefold repetition, counted from the start FEN and the full played move list;
+- the 50-move rule, using the FEN halfmove clock and stopping when it reaches 100 halfmoves.
+
+Checkmate still has priority over draw adjudication. Stalemate, threefold repetition and the 50-move rule produce `1/2-1/2`; match PGN also gets a `Termination` tag such as `threefold repetition` or `50-move rule`.
+
+The match runner no longer sends only the current FEN to UCI engines. It now sends the start FEN plus the full move list:
+
+```text
+position fen <start-fen> moves <uci-move> <uci-move> ...
+```
+
+That keeps repetition history visible to external engines such as Stockfish, instead of making every move look like an isolated FEN position.

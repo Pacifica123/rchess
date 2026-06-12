@@ -230,6 +230,9 @@ impl SearchWorker {
 
     fn negamax(&mut self, position: &Position, depth: u8, mut alpha: i32, mut beta: i32, ply: i32) -> i32 {
         self.searched_nodes += 1;
+        if position.is_fifty_move_rule_draw() {
+            return 0;
+        }
         let alpha_start = alpha;
         let key = hash_position(position);
 
@@ -294,6 +297,9 @@ impl SearchWorker {
 
     fn quiescence(&mut self, position: &Position, mut alpha: i32, beta: i32, ply: i32) -> i32 {
         self.searched_nodes += 1;
+        if position.is_fifty_move_rule_draw() {
+            return 0;
+        }
         let stand_pat = evaluate_for_side_to_move(position);
         if stand_pat >= beta {
             return beta;
@@ -519,7 +525,7 @@ pub fn evaluate_tactical_for_side_to_move(position: &Position) -> i32 {
     if position.is_checkmate() {
         return -MATE_SCORE;
     }
-    if position.is_stalemate() {
+    if position.is_stalemate() || position.is_fifty_move_rule_draw() {
         return 0;
     }
     let moves = position.legal_moves();
@@ -632,5 +638,11 @@ mod tests {
         let mut engine = Engine::new(1);
         let (_best, search_score) = engine.best_move_with_score(&position).unwrap();
         assert!(score_is_mate(search_score));
+    }
+
+    #[test]
+    fn tactical_eval_scores_fifty_move_rule_as_draw() {
+        let position = Position::from_fen("4k3/8/8/8/8/8/8/R3K3 w Q - 100 42").unwrap();
+        assert_eq!(evaluate_tactical_for_side_to_move(&position), 0);
     }
 }

@@ -202,6 +202,23 @@ impl ChessMove {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DrawReason {
+    Stalemate,
+    FiftyMoveRule,
+    ThreefoldRepetition,
+}
+
+impl DrawReason {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Stalemate => "stalemate",
+            Self::FiftyMoveRule => "50-move rule",
+            Self::ThreefoldRepetition => "threefold repetition",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Position {
     board: [Option<Piece>; 64],
@@ -302,6 +319,18 @@ impl Position {
     }
 
     pub fn to_fen(&self) -> String {
+        format!(
+            "{} {} {} {} {} {}",
+            self.board_fen(),
+            self.side_to_move.fen(),
+            self.castling.to_fen(),
+            self.en_passant.map(square_name).unwrap_or_else(|| "-".to_string()),
+            self.halfmove_clock,
+            self.fullmove_number
+        )
+    }
+
+    fn board_fen(&self) -> String {
         let mut board_part = String::new();
         for rank in (0..8).rev() {
             let mut empty = 0;
@@ -324,19 +353,78 @@ impl Position {
                 board_part.push('/');
             }
         }
-        format!(
-            "{} {} {} {} {} {}",
-            board_part,
-            self.side_to_move.fen(),
-            self.castling.to_fen(),
-            self.en_passant.map(square_name).unwrap_or_else(|| "-".to_string()),
-            self.halfmove_clock,
-            self.fullmove_number
-        )
+        board_part
+    }
+
+    fn legal_en_passant_square(&self) -> Option<u8> {
+        let en_passant = self.en_passant?;
+        let captured_square = match self.side_to_move {
+            Color::White => en_passant.checked_sub(8)?,
+            Color::Black => en_passant.checked_add(8).filter(|square| *square < 64)?,
+        };
+        let captured = self.board[captured_square as usize]?;
+        if captured.color != self.side_to_move.opposite() || captured.kind != PieceKind::Pawn {
+            return None;
+        }
+        self.legal_moves()
+            .into_iter()
+            .find(|chess_move| chess_move.to == en_passant && self.is_capture(*chess_move))
+            .map(|_| en_passant)
     }
 
     pub fn side_to_move(&self) -> Color {
         self.side_to_move
+    }
+
+    pub fn halfmove_clock(&self) -> u32 {
+        self.halfmove_clock
+    }
+
+    pub fn is_fifty_move_rule_draw(&self) -> bool {
+        self.halfmove_clock >= 100 && !self.is_checkmate()
+    }
+
+    pub fn repetition_key(&self) -> String {
+        format!(
+            "{} {} {} {}",
+            self.board_fen(),
+            self.side_to_move.fen(),
+            self.castling.to_fen(),
+            self.legal_en_passant_square()
+                .map(square_name)
+                .unwrap_or_else(|| "-".to_string())
+        )
+    }
+
+    pub fn repetition_count_from_history(start_fen: &str, moves: &[ChessMove]) -> Result<usize, String> {
+        let mut position = Self::from_fen(start_fen)?;
+        let mut keys = vec![position.repetition_key()];
+        for chess_move in moves {
+            position.make_legal_move(*chess_move)?;
+            keys.push(position.repetition_key());
+        }
+        let current = position.repetition_key();
+        Ok(keys.iter().filter(|key| key.as_str() == current.as_str()).count())
+    }
+
+    pub fn is_threefold_repetition_from_history(start_fen: &str, moves: &[ChessMove]) -> Result<bool, String> {
+        Ok(Self::repetition_count_from_history(start_fen, moves)? >= 3)
+    }
+
+    pub fn draw_reason_from_history(start_fen: &str, moves: &[ChessMove]) -> Result<Option<DrawReason>, String> {
+        let mut position = Self::from_fen(start_fen)?;
+        for chess_move in moves {
+            position.make_legal_move(*chess_move)?;
+        }
+        if position.is_stalemate() {
+            Ok(Some(DrawReason::Stalemate))
+        } else if position.is_fifty_move_rule_draw() {
+            Ok(Some(DrawReason::FiftyMoveRule))
+        } else if Self::repetition_count_from_history(start_fen, moves)? >= 3 {
+            Ok(Some(DrawReason::ThreefoldRepetition))
+        } else {
+            Ok(None)
+        }
     }
 
     pub fn piece_at(&self, square: u8) -> Option<Piece> {
@@ -1086,6 +1174,46 @@ mod tests {
         let chess_move = pawn.parse_uci_move("e2e3").unwrap();
         pawn.make_legal_move(chess_move).unwrap();
         assert_eq!(pawn.to_fen(), "4k3/8/8/8/8/4P3/8/4K3 b - - 0 42");
+    }
+
+
+    #[test]
+    fn fifty_move_rule_draw_starts_at_one_hundred_halfmoves() {
+        let quiet_draw = Position::from_fen("4k3/8/8/8/8/8/8/4K3 w - - 100 42").unwrap();
+        assert_eq!(quiet_draw.halfmove_clock(), 100);
+        assert!(quiet_draw.is_fifty_move_rule_draw());
+
+        let before_draw = Position::from_fen("4k3/8/8/8/8/8/8/4K3 w - - 99 42").unwrap();
+        assert!(!before_draw.is_fifty_move_rule_draw());
+    }
+
+    #[test]
+    fn repetition_key_ignores_non_legal_en_passant_targets() {
+        let with_spurious_ep = Position::from_fen("4k3/8/8/8/P7/8/8/4K3 b - a3 0 1").unwrap();
+        let without_ep = Position::from_fen("4k3/8/8/8/P7/8/8/4K3 b - - 0 1").unwrap();
+        assert_eq!(with_spurious_ep.repetition_key(), without_ep.repetition_key());
+
+        let with_legal_ep = Position::from_fen("4k3/8/8/8/pP6/8/8/4K3 b - b3 0 1").unwrap();
+        let same_without_ep = Position::from_fen("4k3/8/8/8/pP6/8/8/4K3 b - - 0 1").unwrap();
+        assert_ne!(with_legal_ep.repetition_key(), same_without_ep.repetition_key());
+    }
+
+    #[test]
+    fn detects_threefold_repetition_from_history() {
+        let mut position = Position::startpos();
+        let mut moves = Vec::new();
+        for move_text in ["g1f3", "g8f6", "f3g1", "f6g8", "g1f3", "g8f6", "f3g1", "f6g8"] {
+            let chess_move = position.parse_uci_move(move_text).unwrap();
+            position.make_legal_move(chess_move).unwrap();
+            moves.push(chess_move);
+        }
+
+        assert_eq!(Position::repetition_count_from_history(STARTPOS_FEN, &moves).unwrap(), 3);
+        assert!(Position::is_threefold_repetition_from_history(STARTPOS_FEN, &moves).unwrap());
+        assert_eq!(
+            Position::draw_reason_from_history(STARTPOS_FEN, &moves).unwrap(),
+            Some(DrawReason::ThreefoldRepetition)
+        );
     }
 
     #[test]

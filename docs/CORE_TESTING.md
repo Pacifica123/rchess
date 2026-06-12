@@ -59,3 +59,13 @@
 ## Текущий инкремент
 
 Добавлены выбранные depth 3 сверки `perft divide`, явный underpromotion, дополнительные en passant cases для halfmove clock и запрета вскрытого шаха за чёрных, а также PGN-тесты на неоднозначность SAN. В GUI добавлены undo/redo, legal moves panel и компактный вывод UCI `info`.
+
+## Draw rules
+
+The core now exposes deterministic helpers for rule-based draws:
+
+- `Position::is_fifty_move_rule_draw()` checks the 100-halfmove threshold;
+- `Position::repetition_key()` builds the board/side/castling/en-passant identity used for repetition;
+- `Position::repetition_count_from_history()` and `Position::draw_reason_from_history()` replay a legal move list from a start FEN and identify threefold repetition.
+
+The repetition key ignores FEN en-passant targets when no legal en-passant capture exists. This avoids treating two otherwise identical positions as different only because a double pawn push created a harmless target square.
