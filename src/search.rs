@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 
-use crate::chess::{file_of, rank_of, ChessMove, Color, PieceKind, Position};
+use crate::chess::{file_of, index, rank_of, ChessMove, Color, Piece, PieceKind, Position};
 
 const INFINITY: i32 = 1_000_000;
 const MATE_SCORE: i32 = 900_000;
@@ -25,6 +25,8 @@ pub struct SearchSettings {
     pub max_threads: usize,
     pub granularity: usize,
     pub hash_mb: usize,
+    pub avoid_draws: bool,
+    pub draw_contempt_cp: i32,
 }
 
 impl Default for SearchSettings {
@@ -37,6 +39,8 @@ impl Default for SearchSettings {
             max_threads,
             granularity: 1,
             hash_mb: 64,
+            avoid_draws: false,
+            draw_contempt_cp: 35,
         }
     }
 }
@@ -46,6 +50,7 @@ impl SearchSettings {
         self.max_threads = self.max_threads.clamp(1, 64);
         self.granularity = self.granularity.clamp(1, 64);
         self.hash_mb = self.hash_mb.clamp(1, 4096);
+        self.draw_contempt_cp = self.draw_contempt_cp.clamp(0, 400);
         self
     }
 }
@@ -79,7 +84,10 @@ impl Engine {
 
     pub fn set_settings(&mut self, settings: SearchSettings) {
         let next = settings.normalized();
-        if next.hash_mb != self.settings.hash_mb {
+        if next.hash_mb != self.settings.hash_mb
+            || next.avoid_draws != self.settings.avoid_draws
+            || next.draw_contempt_cp != self.settings.draw_contempt_cp
+        {
             self.tt = Arc::new(TranspositionTable::new(next.hash_mb));
         }
         self.settings = next;
@@ -106,6 +114,18 @@ impl Engine {
     pub fn set_hash_mb(&mut self, value: usize) {
         let mut settings = self.settings;
         settings.hash_mb = value;
+        self.set_settings(settings);
+    }
+
+    pub fn set_avoid_draws(&mut self, value: bool) {
+        let mut settings = self.settings;
+        settings.avoid_draws = value;
+        self.set_settings(settings);
+    }
+
+    pub fn set_draw_contempt_cp(&mut self, value: i32) {
+        let mut settings = self.settings;
+        settings.draw_contempt_cp = value;
         self.set_settings(settings);
     }
 
@@ -155,7 +175,7 @@ impl Engine {
     }
 
     fn root_candidates_single_thread(&mut self, position: &Position, moves: Vec<ChessMove>, age: u8) -> Vec<RootCandidate> {
-        let mut worker = SearchWorker::new(self.tt.clone(), age);
+        let mut worker = SearchWorker::new(self.tt.clone(), age, self.settings);
         let mut candidates = Vec::with_capacity(moves.len());
         let depth = self.max_depth.saturating_sub(1);
         for (root_index, chess_move) in moves.into_iter().enumerate() {
@@ -163,7 +183,8 @@ impl Engine {
             if next.apply_unchecked(chess_move).is_err() {
                 continue;
             }
-            let score = -worker.negamax(&next, depth, -INFINITY, INFINITY, 1);
+            let raw_score = -worker.negamax(&next, depth, -INFINITY, INFINITY, 1);
+            let score = adjusted_root_score(position, chess_move, raw_score);
             candidates.push(RootCandidate { root_index, chess_move, score });
         }
         self.searched_nodes = worker.searched_nodes;
@@ -182,6 +203,7 @@ impl Engine {
         let mut total_nodes = 0_u64;
         let tt = self.tt.clone();
         let depth = self.max_depth.saturating_sub(1);
+        let settings = self.settings;
 
         thread::scope(|scope| {
             let mut handles = Vec::with_capacity(thread_count);
@@ -195,7 +217,7 @@ impl Engine {
                 let base_position = position.clone();
                 let tt = tt.clone();
                 handles.push(scope.spawn(move || {
-                    let mut worker = SearchWorker::new(tt, age);
+                    let mut worker = SearchWorker::new(tt, age, settings);
                     let mut results = Vec::new();
                     for task in assigned_tasks {
                         for (root_index, chess_move) in task {
@@ -203,7 +225,8 @@ impl Engine {
                             if next.apply_unchecked(chess_move).is_err() {
                                 continue;
                             }
-                            let score = -worker.negamax(&next, depth, -INFINITY, INFINITY, 1);
+                            let raw_score = -worker.negamax(&next, depth, -INFINITY, INFINITY, 1);
+                            let score = adjusted_root_score(&base_position, chess_move, raw_score);
                             results.push(RootCandidate { root_index, chess_move, score });
                         }
                     }
@@ -228,17 +251,22 @@ struct SearchWorker {
     searched_nodes: u64,
     tt: Arc<TranspositionTable>,
     age: u8,
+    settings: SearchSettings,
 }
 
 impl SearchWorker {
-    fn new(tt: Arc<TranspositionTable>, age: u8) -> Self {
-        Self { searched_nodes: 0, tt, age }
+    fn new(tt: Arc<TranspositionTable>, age: u8, settings: SearchSettings) -> Self {
+        Self { searched_nodes: 0, tt, age, settings: settings.normalized() }
+    }
+
+    fn draw_score(&self, position: &Position) -> i32 {
+        draw_score_for_side_to_move(position, self.settings)
     }
 
     fn negamax(&mut self, position: &Position, depth: u8, mut alpha: i32, mut beta: i32, ply: i32) -> i32 {
         self.searched_nodes += 1;
         if position.is_fifty_move_rule_draw() {
-            return 0;
+            return self.draw_score(position);
         }
         let alpha_start = alpha;
         let key = hash_position(position);
@@ -263,7 +291,7 @@ impl SearchWorker {
             return if in_check {
                 -MATE_SCORE + ply
             } else {
-                0
+                self.draw_score(position)
             };
         }
 
@@ -305,7 +333,7 @@ impl SearchWorker {
     fn quiescence(&mut self, position: &Position, mut alpha: i32, beta: i32, ply: i32) -> i32 {
         self.searched_nodes += 1;
         if position.is_fifty_move_rule_draw() {
-            return 0;
+            return self.draw_score(position);
         }
         let stand_pat = evaluate_for_side_to_move(position);
         if stand_pat >= beta {
@@ -497,7 +525,7 @@ pub fn evaluate_white_perspective(position: &Position) -> i32 {
     if black_bishops >= 2 {
         score -= 35;
     }
-    score + strategic_opening_balance(position)
+    score + strategic_opening_balance(position) + king_safety_balance(position)
 }
 
 fn positional_bonus(kind: PieceKind, color: Color, square: u8) -> i32 {
@@ -686,6 +714,317 @@ fn own_rank(square: u8, color: Color) -> i32 {
     }
 }
 
+fn draw_score_for_side_to_move(position: &Position, settings: SearchSettings) -> i32 {
+    if !settings.avoid_draws || settings.draw_contempt_cp == 0 {
+        return 0;
+    }
+    let static_score = evaluate_for_side_to_move(position);
+    if static_score <= -150 {
+        (settings.draw_contempt_cp / 2).max(1)
+    } else {
+        -settings.draw_contempt_cp.max(1)
+    }
+}
+
+fn adjusted_root_score(position: &Position, chess_move: ChessMove, raw_score: i32) -> i32 {
+    if score_is_mate(raw_score) {
+        return raw_score;
+    }
+    raw_score.saturating_add(root_tactical_adjustment(position, chess_move))
+}
+
+fn root_tactical_adjustment(position: &Position, chess_move: ChessMove) -> i32 {
+    let Some(mover) = position.piece_at(chess_move.from) else {
+        return 0;
+    };
+    let captured_value = captured_piece_value(position, chess_move).unwrap_or(0);
+    let was_capture = captured_value > 0;
+    let mut next = position.clone();
+    if next.apply_unchecked(chess_move).is_err() {
+        return 0;
+    }
+    if next.is_checkmate() {
+        return 0;
+    }
+
+    let mut penalty = 0;
+    let opponent_moves = next.legal_moves();
+    if mate_in_one_score(&next, &opponent_moves, 1).is_some() {
+        penalty += 220_000;
+    } else {
+        let own_king_danger = side_king_danger(&next, mover.color);
+        let greedy_queen_capture = mover.kind == PieceKind::Queen && was_capture && captured_value >= PieceKind::Rook.material_value();
+        if (own_king_danger >= 55 || greedy_queen_capture) && side_has_forced_mate_in_two(&next, &opponent_moves) {
+            penalty += 90_000;
+        }
+    }
+
+    let checking_replies = checking_reply_count(&next, &opponent_moves);
+    if checking_replies > 1 {
+        penalty += (checking_replies as i32 - 1) * 18;
+    }
+
+    if was_capture {
+        let see = static_exchange_eval(position, chess_move);
+        if see < -40 {
+            penalty += (-see).min(500);
+        }
+        if mover.kind == PieceKind::Queen && captured_value >= PieceKind::Rook.material_value() {
+            penalty += 45;
+            if checking_replies > 0 {
+                penalty += 80 + checking_replies as i32 * 25;
+            }
+            if side_king_danger(&next, mover.color) >= 70 {
+                penalty += 90;
+            }
+        }
+    }
+
+    -penalty
+}
+
+pub fn static_exchange_eval(position: &Position, chess_move: ChessMove) -> i32 {
+    let Some(attacker) = position.piece_at(chess_move.from) else {
+        return 0;
+    };
+    let Some(victim_value) = captured_piece_value(position, chess_move) else {
+        return 0;
+    };
+    let mut next = position.clone();
+    if next.apply_unchecked(chess_move).is_err() {
+        return 0;
+    }
+    let moved_value = next
+        .piece_at(chess_move.to)
+        .map(|piece| piece.kind.material_value())
+        .unwrap_or_else(|| attacker.kind.material_value());
+    let opponent = attacker.color.opposite();
+    let mut score = victim_value;
+    if let Some(recapture_value) = least_attacker_value(&next, chess_move.to, opponent) {
+        score -= moved_value;
+        if least_attacker_value(&next, chess_move.to, attacker.color).is_some() {
+            score += recapture_value.min(moved_value) / 2;
+        }
+    }
+    score
+}
+
+fn captured_piece_value(position: &Position, chess_move: ChessMove) -> Option<i32> {
+    if let Some(piece) = position.piece_at(chess_move.to) {
+        return Some(piece.kind.material_value());
+    }
+    let mover = position.piece_at(chess_move.from)?;
+    if mover.kind == PieceKind::Pawn
+        && position.is_capture(chess_move)
+        && file_of(chess_move.from) != file_of(chess_move.to)
+    {
+        return Some(PieceKind::Pawn.material_value());
+    }
+    None
+}
+
+fn checking_reply_count(position: &Position, moves: &[ChessMove]) -> usize {
+    let mut count = 0;
+    for chess_move in moves.iter().copied() {
+        let mut next = position.clone();
+        if next.apply_unchecked(chess_move).is_ok() && next.is_in_check(next.side_to_move()) {
+            count += 1;
+            if count >= 6 {
+                break;
+            }
+        }
+    }
+    count
+}
+
+fn side_has_forced_mate_in_two(position: &Position, first_moves: &[ChessMove]) -> bool {
+    if first_moves.len() > 48 {
+        return false;
+    }
+    for first in first_moves.iter().copied() {
+        let mut after_first = position.clone();
+        if after_first.apply_unchecked(first).is_err() {
+            continue;
+        }
+        if after_first.is_checkmate() {
+            return true;
+        }
+        let replies = after_first.legal_moves();
+        if replies.is_empty() || replies.len() > 64 {
+            continue;
+        }
+        let mut all_replies_allow_mate = true;
+        for reply in replies {
+            let mut after_reply = after_first.clone();
+            if after_reply.apply_unchecked(reply).is_err() {
+                all_replies_allow_mate = false;
+                break;
+            }
+            let mating_moves = after_reply.legal_moves();
+            if mate_in_one_score(&after_reply, &mating_moves, 0).is_none() {
+                all_replies_allow_mate = false;
+                break;
+            }
+        }
+        if all_replies_allow_mate {
+            return true;
+        }
+    }
+    false
+}
+
+fn king_safety_balance(position: &Position) -> i32 {
+    -side_king_danger(position, Color::White) + side_king_danger(position, Color::Black)
+}
+
+fn side_king_danger(position: &Position, color: Color) -> i32 {
+    let Some(king) = position.king_square(color) else {
+        return 400;
+    };
+    if position.fullmove_number() > 45 && non_pawn_material_total(position) <= 1_600 {
+        return 0;
+    }
+    let opponent = color.opposite();
+    let ring = king_ring_squares(king);
+    let mut danger = 0;
+    for square in 0_u8..64 {
+        let Some(piece) = position.piece_at(square) else {
+            continue;
+        };
+        if piece.color != opponent {
+            continue;
+        }
+        let unit = attack_unit(piece.kind);
+        let mut touches_ring = false;
+        for target in &ring {
+            if attacks_square(position, square, piece, *target) {
+                touches_ring = true;
+                danger += unit;
+            }
+        }
+        if touches_ring && piece.kind == PieceKind::Queen {
+            danger += 4;
+        }
+        if attacks_square(position, square, piece, king) {
+            danger += unit * 2;
+        }
+    }
+
+    danger += missing_pawn_shield_penalty(position, color, king);
+    if !king_is_castled(position, color) && (2..=5).contains(&file_of(king)) && position.fullmove_number() <= 28 {
+        danger += 18;
+    }
+    danger.min(350)
+}
+
+fn non_pawn_material_total(position: &Position) -> i32 {
+    let mut total = 0;
+    for square in 0_u8..64 {
+        let Some(piece) = position.piece_at(square) else {
+            continue;
+        };
+        if piece.kind != PieceKind::Pawn && piece.kind != PieceKind::King {
+            total += piece.kind.material_value();
+        }
+    }
+    total
+}
+
+fn king_ring_squares(king: u8) -> Vec<u8> {
+    let mut squares = Vec::with_capacity(9);
+    for df in -1..=1 {
+        for dr in -1..=1 {
+            if let Some(square) = index(file_of(king) + df, rank_of(king) + dr) {
+                squares.push(square);
+            }
+        }
+    }
+    squares
+}
+
+fn missing_pawn_shield_penalty(position: &Position, color: Color, king: u8) -> i32 {
+    let direction = match color {
+        Color::White => 1,
+        Color::Black => -1,
+    };
+    let mut penalty = 0;
+    for df in -1..=1 {
+        if let Some(square) = index(file_of(king) + df, rank_of(king) + direction) {
+            match position.piece_at(square) {
+                Some(Piece { color: pawn_color, kind: PieceKind::Pawn }) if pawn_color == color => {}
+                _ => penalty += 8,
+            }
+        }
+    }
+    penalty
+}
+
+fn attack_unit(kind: PieceKind) -> i32 {
+    match kind {
+        PieceKind::Pawn => 3,
+        PieceKind::Knight => 5,
+        PieceKind::Bishop => 4,
+        PieceKind::Rook => 5,
+        PieceKind::Queen => 8,
+        PieceKind::King => 1,
+    }
+}
+
+fn least_attacker_value(position: &Position, target: u8, color: Color) -> Option<i32> {
+    let mut best: Option<i32> = None;
+    for square in 0_u8..64 {
+        let Some(piece) = position.piece_at(square) else {
+            continue;
+        };
+        if piece.color == color && attacks_square(position, square, piece, target) {
+            let value = piece.kind.material_value();
+            best = Some(best.map(|current| current.min(value)).unwrap_or(value));
+        }
+    }
+    best
+}
+
+fn attacks_square(position: &Position, from: u8, piece: Piece, target: u8) -> bool {
+    if from == target {
+        return false;
+    }
+    let df = file_of(target) - file_of(from);
+    let dr = rank_of(target) - rank_of(from);
+    match piece.kind {
+        PieceKind::Pawn => match piece.color {
+            Color::White => dr == 1 && df.abs() == 1,
+            Color::Black => dr == -1 && df.abs() == 1,
+        },
+        PieceKind::Knight => (df.abs() == 1 && dr.abs() == 2) || (df.abs() == 2 && dr.abs() == 1),
+        PieceKind::Bishop => df.abs() == dr.abs() && line_clear(position, from, target, df.signum(), dr.signum()),
+        PieceKind::Rook => (df == 0 || dr == 0) && line_clear(position, from, target, df.signum(), dr.signum()),
+        PieceKind::Queen => {
+            (df.abs() == dr.abs() || df == 0 || dr == 0)
+                && line_clear(position, from, target, df.signum(), dr.signum())
+        }
+        PieceKind::King => df.abs() <= 1 && dr.abs() <= 1,
+    }
+}
+
+fn line_clear(position: &Position, from: u8, target: u8, step_file: i32, step_rank: i32) -> bool {
+    if step_file == 0 && step_rank == 0 {
+        return false;
+    }
+    let mut file = file_of(from) + step_file;
+    let mut rank = rank_of(from) + step_rank;
+    while let Some(square) = index(file, rank) {
+        if square == target {
+            return true;
+        }
+        if position.piece_at(square).is_some() {
+            return false;
+        }
+        file += step_file;
+        rank += step_rank;
+    }
+    false
+}
+
 
 pub fn evaluate_tactical_for_side_to_move(position: &Position) -> i32 {
     if position.is_checkmate() {
@@ -745,6 +1084,7 @@ fn move_order_score(position: &Position, chess_move: ChessMove) -> i32 {
             .map(|piece| piece.kind.material_value())
             .unwrap_or(PieceKind::Pawn.material_value());
         score += 10 * victim_value - attacker.kind.material_value();
+        score += (static_exchange_eval(position, chess_move) * 2).clamp(-2_000, 2_000);
     }
     if attacker.kind == PieceKind::King && (file_of(chess_move.from) - file_of(chess_move.to)).abs() == 2 {
         score += 50;
@@ -779,6 +1119,8 @@ mod tests {
             max_threads: 4,
             granularity: 2,
             hash_mb: 4,
+            avoid_draws: false,
+            draw_contempt_cp: 35,
         });
         let parallel_best = parallel.best_move_with_score(&position).unwrap();
 
@@ -810,5 +1152,20 @@ mod tests {
     fn tactical_eval_scores_fifty_move_rule_as_draw() {
         let position = Position::from_fen("4k3/8/8/8/8/8/8/R3K3 w Q - 100 42").unwrap();
         assert_eq!(evaluate_tactical_for_side_to_move(&position), 0);
+    }
+
+    #[test]
+    fn avoid_draws_turns_draw_score_into_contempt_when_not_worse() {
+        let position = Position::from_fen("4k3/8/8/8/8/8/8/R3K3 w Q - 100 42").unwrap();
+        let mut engine = Engine::new(1);
+        engine.set_avoid_draws(true);
+        assert!(draw_score_for_side_to_move(&position, engine.settings()) < 0);
+    }
+
+    #[test]
+    fn see_marks_hanging_queen_capture_as_bad() {
+        let position = Position::from_fen("4k3/8/8/8/8/1b6/r7/Q3K3 w - - 0 1").unwrap();
+        let chess_move = position.parse_uci_move("a1a2").unwrap();
+        assert!(static_exchange_eval(&position, chess_move) < 0);
     }
 }

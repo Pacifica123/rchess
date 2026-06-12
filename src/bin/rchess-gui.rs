@@ -217,6 +217,7 @@ struct RChessGui {
     planned_threads: u16,
     search_granularity: u16,
     planned_hash_mb: u32,
+    avoid_draws: bool,
     resource_settings_status: String,
     experience_book_enabled: bool,
     experience_book_path: String,
@@ -351,6 +352,7 @@ impl RChessGui {
             planned_threads: default_threads,
             search_granularity: 1,
             planned_hash_mb: 64,
+            avoid_draws: false,
             resource_settings_status: format!("Internal rchess defaults: deterministic_multithread={}, max_threads={}, granularity=1, Hash=64 MB", default_threads > 1, default_threads),
             experience_book_enabled: false,
             experience_book_path: ExperienceConfig::default().path,
@@ -886,6 +888,7 @@ impl RChessGui {
                 self.planned_threads,
                 self.search_granularity,
                 self.planned_hash_mb,
+                self.avoid_draws,
             );
             let _ = send_rchess_experience_options(&mut engine, &self.experience_config());
         }
@@ -923,13 +926,14 @@ impl RChessGui {
             self.planned_threads,
             self.search_granularity,
             self.planned_hash_mb,
+            self.avoid_draws,
         )
         .and_then(|_| send_rchess_experience_options(engine, &config));
         match resource_result {
             Ok(()) => {
                 self.resource_settings_status = format!(
-                    "Applied to internal rchess: deterministic_multithread={}, max_threads={}, granularity={}, Hash={} MB, experience_book={}",
-                    self.deterministic_multithread, self.planned_threads, self.search_granularity, self.planned_hash_mb, self.experience_book_enabled
+                    "Applied to internal rchess: deterministic_multithread={}, max_threads={}, granularity={}, Hash={} MB, AvoidDraws={}, experience_book={}",
+                    self.deterministic_multithread, self.planned_threads, self.search_granularity, self.planned_hash_mb, self.avoid_draws, self.experience_book_enabled
                 );
                 self.experience_status = format!(
                     "Experience config applied: enabled={}, path={}, min_games={}, tolerance={} cp",
@@ -1130,6 +1134,7 @@ impl RChessGui {
             self.planned_threads,
             self.search_granularity,
             self.planned_hash_mb,
+            self.avoid_draws,
             &self.experience_config(),
             &self.match_white_options,
         ) {
@@ -1143,6 +1148,7 @@ impl RChessGui {
             self.planned_threads,
             self.search_granularity,
             self.planned_hash_mb,
+            self.avoid_draws,
             &self.experience_config(),
             &self.match_black_options,
         ) {
@@ -1436,6 +1442,7 @@ impl RChessGui {
                 self.planned_threads,
                 self.search_granularity,
                 self.planned_hash_mb,
+                false,
             );
         }
 
@@ -2347,6 +2354,7 @@ impl RChessGui {
             ui.label("Hash MB");
             ui.add(egui::DragValue::new(&mut self.planned_hash_mb).range(1..=4096).speed(16.0));
         });
+        ui.checkbox(&mut self.avoid_draws, "Avoid draws for internal rchess");
         ui.separator();
         ui.heading("Experience book");
         ui.label("Deterministic mode: the book can only break ties between root moves inside the configured score tolerance. It does not change evaluation weights.");
@@ -2483,6 +2491,7 @@ impl RChessGui {
             ui.label("Max plies");
             ui.add(egui::DragValue::new(&mut self.match_max_plies).range(2..=600).speed(2.0));
         });
+        ui.checkbox(&mut self.avoid_draws, "Internal rchess should avoid draw loops");
         ui.horizontal_wrapped(|ui| {
             if ui
                 .add_enabled(!self.match_running && !self.pending_engine, egui::Button::new("Start match"))
@@ -3150,6 +3159,7 @@ fn send_rchess_resource_options(
     max_threads: u16,
     granularity: u16,
     hash_mb: u32,
+    avoid_draws: bool,
 ) -> std::io::Result<()> {
     engine.send(&format!(
         "setoption name deterministic_multithread value {}",
@@ -3158,6 +3168,7 @@ fn send_rchess_resource_options(
     engine.send(&format!("setoption name max_threads value {}", max_threads.max(1)))?;
     engine.send(&format!("setoption name granularity value {}", granularity.max(1)))?;
     engine.send(&format!("setoption name Hash value {}", hash_mb.max(1)))?;
+    engine.send(&format!("setoption name AvoidDraws value {}", avoid_draws))?;
     Ok(())
 }
 
@@ -3182,6 +3193,7 @@ fn send_match_engine_startup_options(
     max_threads: u16,
     granularity: u16,
     hash_mb: u32,
+    avoid_draws: bool,
     experience: &ExperienceConfig,
     extra_options: &str,
 ) -> Result<(), String> {
@@ -3192,6 +3204,7 @@ fn send_match_engine_startup_options(
             max_threads,
             granularity,
             hash_mb,
+            avoid_draws,
         )
         .map_err(|error| error.to_string())?;
         send_rchess_experience_options(engine, experience).map_err(|error| error.to_string())?;
