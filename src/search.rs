@@ -22,9 +22,12 @@ pub struct SearchSettings {
 
 impl Default for SearchSettings {
     fn default() -> Self {
+        let max_threads = std::thread::available_parallelism()
+            .map(|threads| threads.get().clamp(1, 64))
+            .unwrap_or(1);
         Self {
-            deterministic_multithread: false,
-            max_threads: 1,
+            deterministic_multithread: max_threads > 1,
+            max_threads,
             granularity: 1,
             hash_mb: 64,
         }
@@ -252,6 +255,10 @@ impl SearchWorker {
             } else {
                 0
             };
+        }
+
+        if let Some(score) = mate_in_one_score(position, &moves, ply) {
+            return score;
         }
 
         if depth == 0 && !in_check {
@@ -507,6 +514,47 @@ fn positional_bonus(kind: PieceKind, color: Color, square: u8) -> i32 {
     }
 }
 
+
+pub fn evaluate_tactical_for_side_to_move(position: &Position) -> i32 {
+    if position.is_checkmate() {
+        return -MATE_SCORE;
+    }
+    if position.is_stalemate() {
+        return 0;
+    }
+    let moves = position.legal_moves();
+    if let Some(score) = mate_in_one_score(position, &moves, 0) {
+        return score;
+    }
+    evaluate_for_side_to_move(position)
+}
+
+fn mate_in_one_score(position: &Position, moves: &[ChessMove], ply: i32) -> Option<i32> {
+    for chess_move in moves.iter().copied() {
+        let mut next = position.clone();
+        if next.apply_unchecked(chess_move).is_err() {
+            continue;
+        }
+        if next.is_checkmate() {
+            return Some(MATE_SCORE - ply - 1);
+        }
+    }
+    None
+}
+
+pub fn score_is_mate(score: i32) -> bool {
+    score.abs() >= MATE_SCORE - 1024
+}
+
+pub fn mate_score_to_uci_moves(score: i32) -> Option<i32> {
+    if !score_is_mate(score) {
+        return None;
+    }
+    let plies = (MATE_SCORE - score.abs()).max(0);
+    let moves = (plies + 1) / 2;
+    Some(if score > 0 { moves.max(1) } else { -moves.max(1) })
+}
+
 fn order_moves(position: &Position, moves: &mut [ChessMove]) {
     moves.sort_by(|left, right| move_order_score(position, *right).cmp(&move_order_score(position, *left)));
 }
@@ -549,6 +597,7 @@ mod tests {
     fn deterministic_root_split_matches_single_thread_best_move() {
         let position = Position::startpos();
         let mut single = Engine::new(2);
+        single.set_deterministic_multithread(false);
         single.set_hash_mb(4);
         let single_best = single.best_move_with_score(&position).unwrap();
 
@@ -572,5 +621,16 @@ mod tests {
         let small = engine.transposition_entries();
         engine.set_hash_mb(2);
         assert!(engine.transposition_entries() > small);
+    }
+
+    #[test]
+    fn quiescence_frontier_sees_mate_in_one() {
+        let position = Position::from_fen("6k1/8/5QK1/8/8/8/8/8 w - - 0 1").unwrap();
+        let score = evaluate_tactical_for_side_to_move(&position);
+        assert!(score_is_mate(score));
+
+        let mut engine = Engine::new(1);
+        let (_best, search_score) = engine.best_move_with_score(&position).unwrap();
+        assert!(score_is_mate(search_score));
     }
 }

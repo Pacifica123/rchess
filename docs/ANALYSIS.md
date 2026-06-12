@@ -68,3 +68,9 @@ static deterministic evaluation
 ```
 
 When a UCI backend returns `bestmove 0000` without a score for a terminal analysis job, the GUI falls back to a deterministic terminal/static score for that FEN. The internal rchess UCI backend also emits a `score mate -1` line when the side to move has already been checkmated.
+
+## Patch: mate scores and shallow tactical display
+
+The GUI now parses UCI `score mate N` lines and converts them into a mate-class evaluation instead of dropping the score and falling back to static material. The board bar therefore keeps mate information from Stockfish and from the internal engine.
+
+When no analysis score is available, the board bar no longer uses a purely static material/positional number. It first checks terminal positions and immediate mate-in-one for the side to move. This is intentionally small and deterministic, but it removes the most visible case where the scale looked blind one move before mate.

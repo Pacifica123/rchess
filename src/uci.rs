@@ -1,7 +1,7 @@
 use std::io::{self, BufRead, Write};
 
 use crate::chess::{Position, STARTPOS_FEN};
-use crate::search::Engine;
+use crate::search::{mate_score_to_uci_moves, Engine};
 
 pub fn run() {
     let stdin = io::stdin();
@@ -21,9 +21,13 @@ pub fn run() {
         if line == "uci" {
             println!("id name rchess-reborn 0.4.0");
             println!("id author ReD_Chajek project");
+            let settings = engine.settings();
             println!("option name Depth type spin default 4 min 1 max 8");
-            println!("option name deterministic_multithread type check default false");
-            println!("option name max_threads type spin default 1 min 1 max 64");
+            println!(
+                "option name deterministic_multithread type check default {}",
+                settings.deterministic_multithread
+            );
+            println!("option name max_threads type spin default {} min 1 max 64", settings.max_threads);
             println!("option name granularity type spin default 1 min 1 max 64");
             println!("option name Hash type spin default 64 min 1 max 4096");
             println!("uciok");
@@ -39,14 +43,15 @@ pub fn run() {
                 Err(error) => eprintln!("info string position error: {error}"),
             }
         } else if let Some(rest) = line.strip_prefix("go") {
-            let depth = parse_go_depth(rest).unwrap_or(4);
+            let depth = parse_go_depth(rest).unwrap_or_else(|| parse_go_movetime_depth(rest).unwrap_or(4));
             engine.set_depth(depth);
             let settings = engine.settings();
             let best = engine.best_move_with_score(&position);
             match best {
                 Some((chess_move, score)) => {
                     println!(
-                        "info depth {depth} score cp {score} nodes {} hashfull 0 string deterministic_multithread={} max_threads={} granularity={} hash_mb={}",
+                        "info depth {depth} {} nodes {} hashfull 0 string deterministic_multithread={} max_threads={} granularity={} hash_mb={}",
+                        format_uci_score(score),
                         engine.searched_nodes(),
                         settings.deterministic_multithread,
                         settings.max_threads,
@@ -143,6 +148,34 @@ fn parse_go_depth(rest: &str) -> Option<u8> {
     None
 }
 
+fn parse_go_movetime_depth(rest: &str) -> Option<u8> {
+    let tokens: Vec<&str> = rest.split_whitespace().collect();
+    for window in tokens.windows(2) {
+        if window[0] == "movetime" {
+            let movetime_ms = window[1].parse::<u64>().ok()?;
+            return Some(match movetime_ms {
+                0..=25 => 1,
+                26..=100 => 2,
+                101..=350 => 3,
+                351..=1200 => 4,
+                1201..=3500 => 5,
+                3501..=9000 => 6,
+                9001..=20000 => 7,
+                _ => 8,
+            });
+        }
+    }
+    None
+}
+
+fn format_uci_score(score: i32) -> String {
+    if let Some(mate) = mate_score_to_uci_moves(score) {
+        format!("score mate {mate}")
+    } else {
+        format!("score cp {score}")
+    }
+}
+
 fn parse_position_command(rest: &str) -> Result<Position, String> {
     let tokens: Vec<&str> = rest.split_whitespace().collect();
     if tokens.is_empty() {
@@ -209,5 +242,12 @@ mod tests {
         assert_eq!(settings.max_threads, 4);
         assert_eq!(settings.granularity, 2);
         assert_eq!(settings.hash_mb, 8);
+    }
+
+    #[test]
+    fn maps_movetime_to_internal_depth() {
+        assert_eq!(parse_go_movetime_depth("movetime 10"), Some(1));
+        assert_eq!(parse_go_movetime_depth("movetime 1000"), Some(4));
+        assert_eq!(parse_go_movetime_depth("movetime 30000"), Some(8));
     }
 }

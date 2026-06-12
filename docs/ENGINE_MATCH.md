@@ -77,3 +77,23 @@ Stockfish 10 vs custom UCI
 ## Shared direction with analysis
 
 The match runner and the analysis runner both use independent UCI child processes. This keeps the GUI prepared for future workflows where a game can be played by two engines and then analysed by a third selected engine.
+
+## Patch: asymmetric engine power
+
+The GUI match panel now has separate limits for White and Black. Each side can use its own depth and movetime; movetime greater than zero overrides depth for that side. This makes handicap testing less blind: for example, `rchess` can stay at depth 3 while Stockfish is forced to depth 1 or a very small movetime.
+
+The panel also accepts per-side UCI option lines. Both raw UCI lines and compact `Name=value` lines are accepted, for example:
+
+```text
+Skill Level=0
+Threads=1
+Hash=16
+```
+
+or:
+
+```text
+setoption name Skill Level value 0
+```
+
+These options are sent to the corresponding child process at match startup. Internal `rchess` children still receive the project resource options (`deterministic_multithread`, `max_threads`, `granularity`, `Hash`) automatically.

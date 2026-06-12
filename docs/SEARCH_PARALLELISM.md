@@ -19,11 +19,11 @@ This means the selected move is not allowed to depend on operating-system thread
 
 ## UCI options
 
-The internal `rchess` UCI backend now advertises these options:
+The internal `rchess` UCI backend now advertises these options. The exact default for the first two options is detected at startup:
 
 ```text
-option name deterministic_multithread type check default false
-option name max_threads type spin default 1 min 1 max 64
+option name deterministic_multithread type check default <true when more than one hardware thread is available>
+option name max_threads type spin default <available hardware threads, clamped to 1..64> min 1 max 64
 option name granularity type spin default 1 min 1 max 64
 option name Hash type spin default 64 min 1 max 4096
 ```
@@ -65,3 +65,11 @@ The current implementation does not yet include:
 - memory-optimized packed board representation.
 
 Those are separate topics. This patch only introduces the first deterministic CPU parallelism layer while keeping the original project philosophy: no NNUE, no black-box AI, reproducible behaviour first, strength second.
+
+## Patch: tactical horizon and default CPU use
+
+The low-depth search now runs a cheap mate-in-one probe before falling back to quiescence at the depth frontier. This specifically fixes the worst shallow-analysis failure mode where a non-capture mating move is invisible to the static evaluator. The same probe is also exposed to the GUI evaluation bar, so a live board position with an immediate mate no longer displays as an ordinary material score before full PGN analysis is run.
+
+The internal engine now defaults to deterministic root splitting when the machine reports more than one hardware thread. `max_threads` is initialized from `std::thread::available_parallelism()` and remains clamped by the existing UCI option bounds. The GUI mirrors that default in its resource panel, so game analysis and internal-engine searches use the implemented parallel root layer unless the user turns it off.
+
+The UCI backend now emits `score mate N` for mate-distance scores instead of huge centipawn values. `go movetime N` is still not a real clock manager, but the internal backend maps movetime buckets to a bounded depth so engine-vs-engine matches can use rough per-side power limits without silently ignoring `movetime`.

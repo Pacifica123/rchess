@@ -13,7 +13,7 @@ use rchess::analysis::{format_accuracy, format_cp, format_cp_value, AnalysisJob,
 use rchess::chess::{square_name, ChessMove, Color, PieceKind, Position, STARTPOS_FEN};
 use rchess::matchplay::{EngineMatchController, SearchLimit, UciEngineSlot};
 use rchess::pgn::{export_pgn, move_to_san, parse_pgn, position_after_moves};
-use rchess::search::evaluate_for_side_to_move;
+use rchess::search::evaluate_tactical_for_side_to_move;
 
 fn main() -> eframe::Result<()> {
     if env::args().any(|arg| arg == "--engine-mode") {
@@ -219,8 +219,12 @@ struct RChessGui {
     resource_settings_status: String,
     match_white_path: String,
     match_black_path: String,
-    match_depth: u8,
-    match_movetime_ms: u64,
+    match_white_depth: u8,
+    match_black_depth: u8,
+    match_white_movetime_ms: u64,
+    match_black_movetime_ms: u64,
+    match_white_options: String,
+    match_black_options: String,
     match_max_plies: u32,
     match_controller: Option<EngineMatchController>,
     match_white_engine: Option<UciEngine>,
@@ -303,6 +307,7 @@ impl RChessGui {
         } else {
             format!("Stockfish 10 candidate: {detected_stockfish10}")
         };
+        let default_threads = default_parallel_threads();
         let mut app = Self {
             fen_input: STARTPOS_FEN.to_string(),
             game_start_fen: STARTPOS_FEN.to_string(),
@@ -336,15 +341,19 @@ impl RChessGui {
             engine_log: Vec::new(),
             last_engine_info: String::new(),
             last_engine_score_cp: None,
-            deterministic_multithread: false,
-            planned_threads: 1,
+            deterministic_multithread: default_threads > 1,
+            planned_threads: default_threads,
             search_granularity: 1,
             planned_hash_mb: 64,
-            resource_settings_status: "Internal rchess resource settings are applied to the UCI child before search; external engines are not configured by these project-specific options".to_string(),
+            resource_settings_status: format!("Internal rchess defaults: deterministic_multithread={}, max_threads={}, granularity=1, Hash=64 MB", default_threads > 1, default_threads),
             match_white_path: String::new(),
             match_black_path: String::new(),
-            match_depth: 3,
-            match_movetime_ms: 0,
+            match_white_depth: 3,
+            match_black_depth: 3,
+            match_white_movetime_ms: 0,
+            match_black_movetime_ms: 0,
+            match_white_options: String::new(),
+            match_black_options: String::new(),
             match_max_plies: 160,
             match_controller: None,
             match_white_engine: None,
@@ -981,17 +990,18 @@ impl RChessGui {
             }
         };
 
-        let limit = SearchLimit::depth_or_movetime(self.match_depth, self.match_movetime_ms);
+        let white_limit = SearchLimit::depth_or_movetime(self.match_white_depth, self.match_white_movetime_ms);
+        let black_limit = SearchLimit::depth_or_movetime(self.match_black_depth, self.match_black_movetime_ms);
         let white_name = white_command.label.clone();
         let black_name = black_command.label.clone();
         let white_is_internal_rchess = white_command.is_internal_rchess;
         let black_is_internal_rchess = black_command.is_internal_rchess;
         let white_slot = UciEngineSlot::new(white_name.clone(), white_command.program.to_string_lossy().to_string())
             .with_args(white_command.args.clone())
-            .with_limit(limit.clone());
+            .with_limit(white_limit);
         let black_slot = UciEngineSlot::new(black_name.clone(), black_command.program.to_string_lossy().to_string())
             .with_args(black_command.args.clone())
-            .with_limit(limit);
+            .with_limit(black_limit);
 
         let start_fen = self.position.to_fen();
         let controller = match EngineMatchController::from_fen(&start_fen, white_slot, black_slot) {
@@ -1017,23 +1027,38 @@ impl RChessGui {
             }
         };
 
-        if white_is_internal_rchess {
-            let _ = send_rchess_resource_options(
-                &mut white_engine,
-                self.deterministic_multithread,
-                self.planned_threads,
-                self.search_granularity,
-                self.planned_hash_mb,
-            );
+        if let Err(error) = white_engine.send("uci") {
+            self.match_status = format!("White match UCI startup error: {error}");
+            return;
         }
-        if black_is_internal_rchess {
-            let _ = send_rchess_resource_options(
-                &mut black_engine,
-                self.deterministic_multithread,
-                self.planned_threads,
-                self.search_granularity,
-                self.planned_hash_mb,
-            );
+        if let Err(error) = black_engine.send("uci") {
+            self.match_status = format!("Black match UCI startup error: {error}");
+            return;
+        }
+
+        if let Err(error) = send_match_engine_startup_options(
+            &mut white_engine,
+            white_is_internal_rchess,
+            self.deterministic_multithread,
+            self.planned_threads,
+            self.search_granularity,
+            self.planned_hash_mb,
+            &self.match_white_options,
+        ) {
+            self.match_status = format!("White match option error: {error}");
+            return;
+        }
+        if let Err(error) = send_match_engine_startup_options(
+            &mut black_engine,
+            black_is_internal_rchess,
+            self.deterministic_multithread,
+            self.planned_threads,
+            self.search_granularity,
+            self.planned_hash_mb,
+            &self.match_black_options,
+        ) {
+            self.match_status = format!("Black match option error: {error}");
+            return;
         }
 
         self.game_start_fen = start_fen;
@@ -1049,11 +1074,13 @@ impl RChessGui {
         self.match_running = true;
         self.match_log.clear();
         self.match_pgn_text.clear();
-        self.match_status = format!("Match started: {white_name} vs {black_name}");
+        self.match_status = format!(
+            "Match started: {white_name} ({}) vs {black_name} ({})",
+            SearchLimit::depth_or_movetime(self.match_white_depth, self.match_white_movetime_ms).go_command(),
+            SearchLimit::depth_or_movetime(self.match_black_depth, self.match_black_movetime_ms).go_command()
+        );
 
-        let _ = self.send_to_match_engine(Color::White, "uci");
         let _ = self.send_to_match_engine(Color::White, "isready");
-        let _ = self.send_to_match_engine(Color::Black, "uci");
         let _ = self.send_to_match_engine(Color::Black, "isready");
         self.request_next_match_move();
     }
@@ -1562,7 +1589,7 @@ impl RChessGui {
                 return score_from_side_to_move_to_white(display_position.side_to_move(), score);
             }
         }
-        score_from_side_to_move_to_white(display_position.side_to_move(), evaluate_for_side_to_move(display_position))
+        score_from_side_to_move_to_white(display_position.side_to_move(), evaluate_tactical_for_side_to_move(display_position))
     }
 
 
@@ -2324,9 +2351,26 @@ impl RChessGui {
             ui.label("Black");
             ui.text_edit_singleline(&mut self.match_black_path);
         });
+        ui.separator();
+        ui.label("Per-side power. Movetime > 0 overrides depth for that side.");
         ui.horizontal(|ui| {
-            ui.add(egui::Slider::new(&mut self.match_depth, 1..=8).text("Depth"));
-            ui.add(egui::DragValue::new(&mut self.match_movetime_ms).speed(50.0).prefix("ms "));
+            ui.label("White power");
+            ui.add(egui::Slider::new(&mut self.match_white_depth, 1..=8).text("depth"));
+            ui.add(egui::DragValue::new(&mut self.match_white_movetime_ms).range(0..=60_000).speed(50.0).prefix("ms "));
+        });
+        ui.horizontal(|ui| {
+            ui.label("Black power");
+            ui.add(egui::Slider::new(&mut self.match_black_depth, 1..=8).text("depth"));
+            ui.add(egui::DragValue::new(&mut self.match_black_movetime_ms).range(0..=60_000).speed(50.0).prefix("ms "));
+        });
+        ui.collapsing("Per-side UCI options", |ui| {
+            ui.label("One option per line. Accepted forms: `Skill Level=0` or `setoption name Skill Level value 0`.");
+            ui.columns(2, |columns| {
+                columns[0].label("White options");
+                columns[0].text_edit_multiline(&mut self.match_white_options);
+                columns[1].label("Black options");
+                columns[1].text_edit_multiline(&mut self.match_black_options);
+            });
         });
         ui.horizontal(|ui| {
             ui.label("Max plies");
@@ -3004,6 +3048,61 @@ fn send_rchess_resource_options(
 }
 
 
+fn send_match_engine_startup_options(
+    engine: &mut UciEngine,
+    is_internal_rchess: bool,
+    deterministic_multithread: bool,
+    max_threads: u16,
+    granularity: u16,
+    hash_mb: u32,
+    extra_options: &str,
+) -> Result<(), String> {
+    if is_internal_rchess {
+        send_rchess_resource_options(
+            engine,
+            deterministic_multithread,
+            max_threads,
+            granularity,
+            hash_mb,
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    send_uci_option_lines(engine, extra_options)
+}
+
+fn send_uci_option_lines(engine: &mut UciEngine, options: &str) -> Result<(), String> {
+    for line in options.lines() {
+        let Some(command) = normalize_uci_option_line(line) else {
+            continue;
+        };
+        engine.send(&command).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn normalize_uci_option_line(line: &str) -> Option<String> {
+    let trimmed = line.split('#').next().unwrap_or("").trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.to_ascii_lowercase().starts_with("setoption ") {
+        return Some(trimmed.to_string());
+    }
+    if trimmed.to_ascii_lowercase().starts_with("name ") {
+        return Some(format!("setoption {trimmed}"));
+    }
+    if let Some((name, value)) = trimmed.split_once('=') {
+        return Some(format!("setoption name {} value {}", name.trim(), value.trim()));
+    }
+    Some(format!("setoption name {trimmed}"))
+}
+
+fn default_parallel_threads() -> u16 {
+    std::thread::available_parallelism()
+        .map(|threads| threads.get().clamp(1, 32) as u16)
+        .unwrap_or(1)
+}
+
 fn parse_uci_score_cp(line: &str) -> Option<i32> {
     let parts: Vec<&str> = line.split_whitespace().collect();
     let score_index = parts.iter().position(|part| *part == "score")?;
@@ -3213,7 +3312,7 @@ fn score_from_fen_side_to_move_to_white(fen: &str, score_cp: i32) -> i32 {
 fn score_for_fen_side_to_move(fen: &str) -> i32 {
     match Position::from_fen(fen) {
         Ok(position) => terminal_score_side_to_move(&position)
-            .unwrap_or_else(|| evaluate_for_side_to_move(&position)),
+            .unwrap_or_else(|| evaluate_tactical_for_side_to_move(&position)),
         Err(_) => 0,
     }
 }

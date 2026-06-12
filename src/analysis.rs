@@ -196,7 +196,15 @@ pub fn format_cp(score: Option<i32>) -> String {
     }
 }
 
+const ANALYSIS_MATE_SCORE_CP: i32 = 30_000;
+
 pub fn format_cp_value(score: i32) -> String {
+    if score >= ANALYSIS_MATE_SCORE_CP {
+        return "#+".to_string();
+    }
+    if score <= -ANALYSIS_MATE_SCORE_CP {
+        return "#-".to_string();
+    }
     let pawns = score as f32 / 100.0;
     if score >= 0 {
         format!("+{pawns:.2}")
