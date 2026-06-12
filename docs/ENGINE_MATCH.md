@@ -114,3 +114,9 @@ position fen <start-fen> moves <uci-move> <uci-move> ...
 ```
 
 That keeps repetition history visible to external engines such as Stockfish, instead of making every move look like an isolated FEN position.
+
+## Export to experience book
+
+После матча можно нажать `Append match to experience book`. GUI дописывает партию в файл `rchess-experience-v1`: для каждого хода сохраняются позиция до хода, UCI/SAN хода, результат партии с точки зрения сделавшей ход стороны, оценки до/после, потеря оценки и простой reason-tag.
+
+Если перед экспортом был выполнен `Game analysis`, в книгу попадут оценки анализа. Если анализа нет, GUI запишет fallback-оценки текущей тактической оценки. Это хуже полноценного анализа, но всё равно достаточно для первичной статистики.

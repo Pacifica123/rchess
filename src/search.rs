@@ -13,6 +13,13 @@ const TT_LOWER: u8 = 1;
 const TT_UPPER: u8 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RootCandidate {
+    pub root_index: usize,
+    pub chess_move: ChessMove,
+    pub score: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SearchSettings {
     pub deterministic_multithread: bool,
     pub max_threads: usize,
@@ -115,42 +122,55 @@ impl Engine {
     }
 
     pub fn best_move_with_score(&mut self, position: &Position) -> Option<(ChessMove, i32)> {
+        self.root_candidates(position)
+            .into_iter()
+            .next()
+            .map(|candidate| (candidate.chess_move, candidate.score))
+    }
+
+    pub fn root_candidates(&mut self, position: &Position) -> Vec<RootCandidate> {
         self.searched_nodes = 0;
         let mut moves = position.legal_moves();
         if moves.is_empty() {
-            return None;
+            return Vec::new();
         }
         order_moves(position, &mut moves);
         let age = self.tt.next_age();
 
-        if self.settings.deterministic_multithread
+        let mut candidates = if self.settings.deterministic_multithread
             && self.settings.max_threads > 1
             && moves.len() >= self.settings.granularity.max(1) * 2
         {
-            return self.best_move_root_split(position, moves, age);
-        }
-
-        let mut worker = SearchWorker::new(self.tt.clone(), age);
-        let mut best_move = moves[0];
-        let mut best_score = -INFINITY;
-        let mut alpha = -INFINITY;
-        let beta = INFINITY;
-
-        for chess_move in moves {
-            let mut next = position.clone();
-            next.apply_unchecked(chess_move).ok()?;
-            let score = -worker.negamax(&next, self.max_depth.saturating_sub(1), -beta, -alpha, 1);
-            if score > best_score {
-                best_score = score;
-                best_move = chess_move;
-            }
-            alpha = alpha.max(score);
-        }
-        self.searched_nodes = worker.searched_nodes;
-        Some((best_move, best_score))
+            self.root_candidates_split(position, moves, age)
+        } else {
+            self.root_candidates_single_thread(position, moves, age)
+        };
+        candidates.sort_by(|left, right| {
+            right
+                .score
+                .cmp(&left.score)
+                .then_with(|| left.root_index.cmp(&right.root_index))
+        });
+        candidates
     }
 
-    fn best_move_root_split(&mut self, position: &Position, moves: Vec<ChessMove>, age: u8) -> Option<(ChessMove, i32)> {
+    fn root_candidates_single_thread(&mut self, position: &Position, moves: Vec<ChessMove>, age: u8) -> Vec<RootCandidate> {
+        let mut worker = SearchWorker::new(self.tt.clone(), age);
+        let mut candidates = Vec::with_capacity(moves.len());
+        let depth = self.max_depth.saturating_sub(1);
+        for (root_index, chess_move) in moves.into_iter().enumerate() {
+            let mut next = position.clone();
+            if next.apply_unchecked(chess_move).is_err() {
+                continue;
+            }
+            let score = -worker.negamax(&next, depth, -INFINITY, INFINITY, 1);
+            candidates.push(RootCandidate { root_index, chess_move, score });
+        }
+        self.searched_nodes = worker.searched_nodes;
+        candidates
+    }
+
+    fn root_candidates_split(&mut self, position: &Position, moves: Vec<ChessMove>, age: u8) -> Vec<RootCandidate> {
         let indexed_moves: Vec<(usize, ChessMove)> = moves.iter().copied().enumerate().collect();
         let granularity = self.settings.granularity.max(1);
         let tasks: Vec<Vec<(usize, ChessMove)>> = indexed_moves
@@ -158,7 +178,7 @@ impl Engine {
             .map(|chunk| chunk.to_vec())
             .collect();
         let thread_count = self.settings.max_threads.min(tasks.len()).max(1);
-        let mut all_results: Vec<(usize, ChessMove, i32)> = Vec::with_capacity(moves.len());
+        let mut all_results: Vec<RootCandidate> = Vec::with_capacity(moves.len());
         let mut total_nodes = 0_u64;
         let tt = self.tt.clone();
         let depth = self.max_depth.saturating_sub(1);
@@ -178,13 +198,13 @@ impl Engine {
                     let mut worker = SearchWorker::new(tt, age);
                     let mut results = Vec::new();
                     for task in assigned_tasks {
-                        for (index, chess_move) in task {
+                        for (root_index, chess_move) in task {
                             let mut next = base_position.clone();
                             if next.apply_unchecked(chess_move).is_err() {
                                 continue;
                             }
                             let score = -worker.negamax(&next, depth, -INFINITY, INFINITY, 1);
-                            results.push((index, chess_move, score));
+                            results.push(RootCandidate { root_index, chess_move, score });
                         }
                     }
                     (results, worker.searched_nodes)
@@ -194,26 +214,13 @@ impl Engine {
             for handle in handles {
                 if let Ok((results, nodes)) = handle.join() {
                     total_nodes += nodes;
-                    for (index, chess_move, score) in results {
-                        all_results.push((index, chess_move, score));
-                    }
+                    all_results.extend(results);
                 }
             }
         });
 
-        if all_results.is_empty() {
-            return None;
-        }
         self.searched_nodes = total_nodes;
-        all_results.sort_by_key(|(index, _, _)| *index);
-
-        let mut best = all_results[0];
-        for result in all_results.into_iter().skip(1) {
-            if result.2 > best.2 || (result.2 == best.2 && result.0 < best.0) {
-                best = result;
-            }
-        }
-        Some((best.1, best.2))
+        all_results
     }
 }
 

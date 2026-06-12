@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use rchess::analysis::{format_accuracy, format_cp, format_cp_value, AnalysisJob, GameAnalysis};
 use rchess::chess::{square_name, ChessMove, Color, DrawReason, PieceKind, Position, STARTPOS_FEN};
+use rchess::experience::{append_game_to_experience_book, ExperienceConfig};
 use rchess::matchplay::{uci_position_command_from_history, EngineMatchController, SearchLimit, UciEngineSlot};
 use rchess::pgn::{export_pgn, move_to_san, parse_pgn, position_after_moves};
 use rchess::search::evaluate_tactical_for_side_to_move;
@@ -217,6 +218,11 @@ struct RChessGui {
     search_granularity: u16,
     planned_hash_mb: u32,
     resource_settings_status: String,
+    experience_book_enabled: bool,
+    experience_book_path: String,
+    experience_min_games: u32,
+    experience_score_tolerance_cp: i32,
+    experience_status: String,
     match_white_path: String,
     match_black_path: String,
     match_white_depth: u8,
@@ -346,6 +352,11 @@ impl RChessGui {
             search_granularity: 1,
             planned_hash_mb: 64,
             resource_settings_status: format!("Internal rchess defaults: deterministic_multithread={}, max_threads={}, granularity=1, Hash=64 MB", default_threads > 1, default_threads),
+            experience_book_enabled: false,
+            experience_book_path: ExperienceConfig::default().path,
+            experience_min_games: ExperienceConfig::default().min_games,
+            experience_score_tolerance_cp: ExperienceConfig::default().score_tolerance_cp,
+            experience_status: "Experience book is disabled".to_string(),
             match_white_path: String::new(),
             match_black_path: String::new(),
             match_white_depth: 3,
@@ -876,6 +887,7 @@ impl RChessGui {
                 self.search_granularity,
                 self.planned_hash_mb,
             );
+            let _ = send_rchess_experience_options(&mut engine, &self.experience_config());
         }
         self.engine = Some(engine);
         self.engine_rx = Some(rx);
@@ -901,24 +913,31 @@ impl RChessGui {
             self.resource_settings_status = "Resource settings are only applied to the internal rchess backend for now".to_string();
             return;
         }
+        let config = self.experience_config();
         let Some(engine) = &mut self.engine else {
             return;
         };
-        match send_rchess_resource_options(
+        let resource_result = send_rchess_resource_options(
             engine,
             self.deterministic_multithread,
             self.planned_threads,
             self.search_granularity,
             self.planned_hash_mb,
-        ) {
+        )
+        .and_then(|_| send_rchess_experience_options(engine, &config));
+        match resource_result {
             Ok(()) => {
                 self.resource_settings_status = format!(
-                    "Applied to internal rchess: deterministic_multithread={}, max_threads={}, granularity={}, Hash={} MB",
-                    self.deterministic_multithread, self.planned_threads, self.search_granularity, self.planned_hash_mb
+                    "Applied to internal rchess: deterministic_multithread={}, max_threads={}, granularity={}, Hash={} MB, experience_book={}",
+                    self.deterministic_multithread, self.planned_threads, self.search_granularity, self.planned_hash_mb, self.experience_book_enabled
+                );
+                self.experience_status = format!(
+                    "Experience config applied: enabled={}, path={}, min_games={}, tolerance={} cp",
+                    self.experience_book_enabled, self.experience_book_path, self.experience_min_games, self.experience_score_tolerance_cp
                 );
             }
             Err(error) => {
-                self.resource_settings_status = format!("Resource option write error: {error}");
+                self.resource_settings_status = format!("Resource/experience option write error: {error}");
             }
         }
     }
@@ -989,6 +1008,48 @@ impl RChessGui {
             },
             None => {
                 self.engine_status = format!("Engine returned illegal move: {move_text}");
+            }
+        }
+    }
+
+
+    fn experience_config(&self) -> ExperienceConfig {
+        ExperienceConfig {
+            enabled: self.experience_book_enabled,
+            path: self.experience_book_path.clone(),
+            min_games: self.experience_min_games,
+            score_tolerance_cp: self.experience_score_tolerance_cp,
+        }
+        .normalized()
+    }
+
+    fn append_current_match_to_experience_book(&mut self) {
+        let Some(controller) = &self.match_controller else {
+            self.experience_status = "No engine match is available to export".to_string();
+            return;
+        };
+        if controller.played_moves.is_empty() {
+            self.experience_status = "Current match has no moves".to_string();
+            return;
+        }
+        let analysis = self.analysis.as_ref();
+        match append_game_to_experience_book(
+            &self.experience_book_path,
+            &controller.start_fen,
+            &controller.played_moves,
+            &controller.result,
+            &controller.white.name,
+            &controller.black.name,
+            analysis,
+        ) {
+            Ok(count) => {
+                self.experience_status = format!(
+                    "Appended {count} move samples to {}. Run normal analysis first if you want engine-depth scores instead of tactical fallback scores.",
+                    self.experience_book_path
+                );
+            }
+            Err(error) => {
+                self.experience_status = format!("Experience export error: {error}");
             }
         }
     }
@@ -1069,6 +1130,7 @@ impl RChessGui {
             self.planned_threads,
             self.search_granularity,
             self.planned_hash_mb,
+            &self.experience_config(),
             &self.match_white_options,
         ) {
             self.match_status = format!("White match option error: {error}");
@@ -1081,6 +1143,7 @@ impl RChessGui {
             self.planned_threads,
             self.search_granularity,
             self.planned_hash_mb,
+            &self.experience_config(),
             &self.match_black_options,
         ) {
             self.match_status = format!("Black match option error: {error}");
@@ -2284,10 +2347,25 @@ impl RChessGui {
             ui.label("Hash MB");
             ui.add(egui::DragValue::new(&mut self.planned_hash_mb).range(1..=4096).speed(16.0));
         });
+        ui.separator();
+        ui.heading("Experience book");
+        ui.label("Deterministic mode: the book can only break ties between root moves inside the configured score tolerance. It does not change evaluation weights.");
+        ui.checkbox(&mut self.experience_book_enabled, "Use experience book for internal rchess");
+        ui.horizontal(|ui| {
+            ui.label("Book file");
+            ui.text_edit_singleline(&mut self.experience_book_path);
+        });
+        ui.horizontal(|ui| {
+            ui.label("Min games");
+            ui.add(egui::DragValue::new(&mut self.experience_min_games).range(1..=10_000).speed(1.0));
+            ui.label("Tolerance cp");
+            ui.add(egui::DragValue::new(&mut self.experience_score_tolerance_cp).range(0..=1000).speed(5.0));
+        });
         if ui.button("Apply to running rchess child").clicked() {
             self.send_primary_engine_resource_options();
         }
         ui.label(&self.resource_settings_status);
+        ui.label(&self.experience_status);
     }
 
     fn show_analysis_panel(&mut self, ui: &mut egui::Ui) {
@@ -2425,7 +2503,14 @@ impl RChessGui {
                 ui.ctx().copy_text(self.match_pgn_text.clone());
                 self.match_status = "Match PGN copied to clipboard".to_string();
             }
+            if ui
+                .add_enabled(!self.match_running && self.match_controller.is_some(), egui::Button::new("Append match to experience book"))
+                .clicked()
+            {
+                self.append_current_match_to_experience_book();
+            }
         });
+        ui.label(&self.experience_status);
         egui::ScrollArea::vertical()
             .id_salt("match_log_scroll")
             .max_height(100.0)
@@ -3077,6 +3162,19 @@ fn send_rchess_resource_options(
 }
 
 
+fn send_rchess_experience_options(engine: &mut UciEngine, config: &ExperienceConfig) -> std::io::Result<()> {
+    let config = config.clone().normalized();
+    engine.send(&format!("setoption name UseExperienceBook value {}", config.enabled))?;
+    engine.send(&format!("setoption name ExperienceBookPath value {}", config.path))?;
+    engine.send(&format!("setoption name ExperienceMinGames value {}", config.min_games))?;
+    engine.send(&format!(
+        "setoption name ExperienceScoreToleranceCp value {}",
+        config.score_tolerance_cp
+    ))?;
+    Ok(())
+}
+
+
 fn send_match_engine_startup_options(
     engine: &mut UciEngine,
     is_internal_rchess: bool,
@@ -3084,6 +3182,7 @@ fn send_match_engine_startup_options(
     max_threads: u16,
     granularity: u16,
     hash_mb: u32,
+    experience: &ExperienceConfig,
     extra_options: &str,
 ) -> Result<(), String> {
     if is_internal_rchess {
@@ -3095,6 +3194,7 @@ fn send_match_engine_startup_options(
             hash_mb,
         )
         .map_err(|error| error.to_string())?;
+        send_rchess_experience_options(engine, experience).map_err(|error| error.to_string())?;
     }
     send_uci_option_lines(engine, extra_options)
 }

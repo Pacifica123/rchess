@@ -80,3 +80,13 @@ When no analysis score is available, the board bar no longer uses a purely stati
 The GUI live result and evaluation bar now treat rule-based draws as terminal for the current game history. A position with a threefold repetition or a halfmove clock of at least 100 is shown as equal and the game status reports the draw reason.
 
 This matters for long engine games: a repeated checking cycle should not stay as `*` until `Max plies`; it should become `1/2-1/2` when the third occurrence is reached.
+
+## Analysis as experience annotation
+
+Отчёт анализа теперь можно использовать как источник подробных полей для книги опыта. При экспорте engine-vs-engine матча в experience book GUI берёт `before_score_cp`, `after_score_cp`, `loss_cp` и `accuracy` из текущего анализа, если он есть. Поэтому рекомендуемый порядок для качественной записи опыта такой:
+
+1. Сыграть engine-vs-engine матч.
+2. Запустить `Game analysis` на этой партии.
+3. Нажать `Append match to experience book`.
+
+Без анализа книга всё равно пополняется, но оценки будут fallback-оценками текущего ядра.
