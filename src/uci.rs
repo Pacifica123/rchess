@@ -38,6 +38,8 @@ pub fn run() {
             println!("option name ExperienceScoreToleranceCp type spin default 80 min 0 max 1000");
             println!("option name AvoidDraws type check default false");
             println!("option name DrawContemptCp type spin default 35 min 0 max 400");
+            println!("option name RiskLevel type spin default 0 min -100 max 100");
+            println!("option name HumanityLevel type spin default 0 min -100 max 100");
             println!("uciok");
         } else if line == "isready" {
             println!("readyok");
@@ -58,13 +60,15 @@ pub fn run() {
             match best {
                 Some((chess_move, score, experience_note)) => {
                     println!(
-                        "info depth {depth} {} nodes {} hashfull 0 string deterministic_multithread={} max_threads={} granularity={} hash_mb={}",
+                        "info depth {depth} {} nodes {} hashfull 0 string deterministic_multithread={} max_threads={} granularity={} hash_mb={} risk_level={} humanity_level={}",
                         format_uci_score(score),
                         engine.searched_nodes(),
                         settings.deterministic_multithread,
                         settings.max_threads,
                         settings.granularity,
-                        settings.hash_mb
+                        settings.hash_mb,
+                        settings.risk_level,
+                        settings.humanity_level
                     );
                     if let Some(note) = experience_note {
                         println!("info string {note}");
@@ -271,6 +275,16 @@ fn handle_setoption(rest: &str, engine: &mut Engine, experience: &mut Experience
                 engine.set_draw_contempt_cp(value);
             }
         }
+        "risklevel" | "risk_level" | "personality_risk" => {
+            if let Ok(value) = value.parse::<i32>() {
+                engine.set_risk_level(value);
+            }
+        }
+        "humanitylevel" | "humanity_level" | "personality_humanity" => {
+            if let Ok(value) = value.parse::<i32>() {
+                engine.set_humanity_level(value);
+            }
+        }
         _ => {}
     }
 }
@@ -429,6 +443,17 @@ mod tests {
         let settings = engine.settings();
         assert!(settings.avoid_draws);
         assert_eq!(settings.draw_contempt_cp, 90);
+    }
+
+    #[test]
+    fn parses_personality_setoptions() {
+        let mut engine = Engine::new(4);
+        let mut experience = ExperienceConfig::default();
+        handle_setoption("name RiskLevel value 75", &mut engine, &mut experience);
+        handle_setoption("name HumanityLevel value 40", &mut engine, &mut experience);
+        let settings = engine.settings();
+        assert_eq!(settings.risk_level, 75);
+        assert_eq!(settings.humanity_level, 40);
     }
 
     #[test]

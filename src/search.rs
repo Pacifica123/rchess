@@ -27,6 +27,8 @@ pub struct SearchSettings {
     pub hash_mb: usize,
     pub avoid_draws: bool,
     pub draw_contempt_cp: i32,
+    pub risk_level: i32,
+    pub humanity_level: i32,
 }
 
 impl Default for SearchSettings {
@@ -41,6 +43,8 @@ impl Default for SearchSettings {
             hash_mb: 64,
             avoid_draws: false,
             draw_contempt_cp: 35,
+            risk_level: 0,
+            humanity_level: 0,
         }
     }
 }
@@ -51,6 +55,8 @@ impl SearchSettings {
         self.granularity = self.granularity.clamp(1, 64);
         self.hash_mb = self.hash_mb.clamp(1, 4096);
         self.draw_contempt_cp = self.draw_contempt_cp.clamp(0, 400);
+        self.risk_level = self.risk_level.clamp(-100, 100);
+        self.humanity_level = self.humanity_level.clamp(-100, 100);
         self
     }
 }
@@ -129,6 +135,18 @@ impl Engine {
         self.set_settings(settings);
     }
 
+    pub fn set_risk_level(&mut self, value: i32) {
+        let mut settings = self.settings;
+        settings.risk_level = value;
+        self.set_settings(settings);
+    }
+
+    pub fn set_humanity_level(&mut self, value: i32) {
+        let mut settings = self.settings;
+        settings.humanity_level = value;
+        self.set_settings(settings);
+    }
+
     pub fn searched_nodes(&self) -> u64 {
         self.searched_nodes
     }
@@ -165,12 +183,9 @@ impl Engine {
         } else {
             self.root_candidates_single_thread(position, moves, age)
         };
-        candidates.sort_by(|left, right| {
-            right
-                .score
-                .cmp(&left.score)
-                .then_with(|| left.root_index.cmp(&right.root_index))
-        });
+        sort_root_candidates(&mut candidates);
+        apply_humanity_to_candidates(position, &mut candidates, self.settings);
+        sort_root_candidates(&mut candidates);
         candidates
     }
 
@@ -184,7 +199,7 @@ impl Engine {
                 continue;
             }
             let raw_score = -worker.negamax(&next, depth, -INFINITY, INFINITY, 1);
-            let score = adjusted_root_score(position, chess_move, raw_score);
+            let score = adjusted_root_score(position, chess_move, raw_score, self.settings);
             candidates.push(RootCandidate { root_index, chess_move, score });
         }
         self.searched_nodes = worker.searched_nodes;
@@ -226,7 +241,7 @@ impl Engine {
                                 continue;
                             }
                             let raw_score = -worker.negamax(&next, depth, -INFINITY, INFINITY, 1);
-                            let score = adjusted_root_score(&base_position, chess_move, raw_score);
+                            let score = adjusted_root_score(&base_position, chess_move, raw_score, settings);
                             results.push(RootCandidate { root_index, chess_move, score });
                         }
                     }
@@ -726,11 +741,123 @@ fn draw_score_for_side_to_move(position: &Position, settings: SearchSettings) ->
     }
 }
 
-fn adjusted_root_score(position: &Position, chess_move: ChessMove, raw_score: i32) -> i32 {
+fn adjusted_root_score(
+    position: &Position,
+    chess_move: ChessMove,
+    raw_score: i32,
+    settings: SearchSettings,
+) -> i32 {
     if score_is_mate(raw_score) {
         return raw_score;
     }
-    raw_score.saturating_add(root_tactical_adjustment(position, chess_move))
+    raw_score
+        .saturating_add(root_tactical_adjustment(position, chess_move))
+        .saturating_add(root_personality_adjustment(position, chess_move, settings))
+}
+
+fn root_personality_adjustment(position: &Position, chess_move: ChessMove, settings: SearchSettings) -> i32 {
+    let risk = settings.risk_level.clamp(-100, 100);
+    if risk == 0 {
+        return 0;
+    }
+    let Some(mover) = position.piece_at(chess_move.from) else {
+        return 0;
+    };
+    let mut next = position.clone();
+    if next.apply_unchecked(chess_move).is_err() || next.is_checkmate() {
+        return 0;
+    }
+
+    let opponent = mover.color.opposite();
+    let gives_check = next.is_in_check(opponent);
+    let own_danger_delta = side_king_danger(&next, mover.color) - side_king_danger(position, mover.color);
+    let opponent_danger_delta = side_king_danger(&next, opponent) - side_king_danger(position, opponent);
+    let see = if position.is_capture(chess_move) {
+        static_exchange_eval(position, chess_move)
+    } else {
+        0
+    };
+
+    if risk > 0 {
+        let mut activity = 0;
+        if gives_check {
+            activity += 45;
+        }
+        activity += opponent_danger_delta.max(0) * 2;
+        if see > 0 {
+            activity += see.min(300) / 5;
+        }
+        if see < -40 && (gives_check || opponent_danger_delta > 10) {
+            activity += 70 + (-see).min(500) / 4;
+        }
+        activity -= own_danger_delta.max(0);
+        return (activity * risk / 100).clamp(-120, 180);
+    }
+
+    let mut safety = 0;
+    safety -= own_danger_delta.max(0) * 3;
+    safety += (-own_danger_delta).max(0);
+    if see < -20 {
+        safety -= (-see).min(500) / 2;
+    }
+    if gives_check && own_danger_delta <= 0 {
+        safety += 8;
+    }
+    (safety * (-risk) / 100).clamp(-220, 120)
+}
+
+fn sort_root_candidates(candidates: &mut [RootCandidate]) {
+    candidates.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.root_index.cmp(&right.root_index))
+    });
+}
+
+fn apply_humanity_to_candidates(
+    position: &Position,
+    candidates: &mut [RootCandidate],
+    settings: SearchSettings,
+) {
+    let humanity = settings.humanity_level.clamp(0, 100);
+    if humanity == 0 || candidates.len() < 2 || score_is_mate(candidates[0].score) {
+        return;
+    }
+
+    let seed = personality_seed(position);
+    let roll = (seed % 1000) as i32;
+    let chance = (humanity * 3).clamp(0, 300);
+    if roll >= chance {
+        return;
+    }
+
+    let best_score = candidates[0].score;
+    let max_loss = (25 + humanity * 6).min(650);
+    let min_loss = if humanity >= 70 && roll < humanity { 100 } else { 15 };
+    let mut eligible = Vec::new();
+    for (index, candidate) in candidates.iter().enumerate().skip(1) {
+        if score_is_mate(candidate.score) {
+            continue;
+        }
+        let loss = best_score.saturating_sub(candidate.score);
+        if (min_loss..=max_loss).contains(&loss) {
+            eligible.push(index);
+        }
+    }
+    if eligible.is_empty() {
+        return;
+    }
+
+    let chosen = eligible[((seed >> 11) as usize) % eligible.len()];
+    let bump = best_score.saturating_sub(candidates[chosen].score).saturating_add(1);
+    candidates[chosen].score = candidates[chosen].score.saturating_add(bump);
+}
+
+fn personality_seed(position: &Position) -> u64 {
+    let mut seed = hash_position(position) ^ 0x9e37_79b9_7f4a_7c15;
+    seed ^= (position.fullmove_number() as u64).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    seed.rotate_left(23).wrapping_mul(0x94d0_49bb_1331_11eb)
 }
 
 fn root_tactical_adjustment(position: &Position, chess_move: ChessMove) -> i32 {
@@ -1121,6 +1248,8 @@ mod tests {
             hash_mb: 4,
             avoid_draws: false,
             draw_contempt_cp: 35,
+            risk_level: 0,
+            humanity_level: 0,
         });
         let parallel_best = parallel.best_move_with_score(&position).unwrap();
 

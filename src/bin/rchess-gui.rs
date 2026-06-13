@@ -218,6 +218,9 @@ struct RChessGui {
     search_granularity: u16,
     planned_hash_mb: u32,
     avoid_draws: bool,
+    personality_risk: f32,
+    personality_humanity: f32,
+    personality_status: String,
     resource_settings_status: String,
     experience_book_enabled: bool,
     experience_book_path: String,
@@ -353,7 +356,10 @@ impl RChessGui {
             search_granularity: 1,
             planned_hash_mb: 64,
             avoid_draws: false,
-            resource_settings_status: format!("Internal rchess defaults: deterministic_multithread={}, max_threads={}, granularity=1, Hash=64 MB", default_threads > 1, default_threads),
+            personality_risk: 0.0,
+            personality_humanity: 0.0,
+            personality_status: "Engine personality is neutral: RiskLevel=0, HumanityLevel=0".to_string(),
+            resource_settings_status: format!("Internal rchess defaults: deterministic_multithread={}, max_threads={}, granularity=1, Hash=64 MB, RiskLevel=0, HumanityLevel=0", default_threads > 1, default_threads),
             experience_book_enabled: false,
             experience_book_path: ExperienceConfig::default().path,
             experience_min_games: ExperienceConfig::default().min_games,
@@ -889,6 +895,8 @@ impl RChessGui {
                 self.search_granularity,
                 self.planned_hash_mb,
                 self.avoid_draws,
+                self.personality_risk_level(),
+                self.personality_humanity_level(),
             );
             let _ = send_rchess_experience_options(&mut engine, &self.experience_config());
         }
@@ -914,10 +922,18 @@ impl RChessGui {
     fn send_primary_engine_resource_options(&mut self) {
         if self.engine_backend != EngineBackend::RChess {
             self.resource_settings_status = "Resource settings are only applied to the internal rchess backend for now".to_string();
+            self.personality_status = "Personality settings are stored but only affect the internal rchess backend".to_string();
             return;
         }
         let config = self.experience_config();
+        let risk_level = self.personality_risk_level();
+        let humanity_level = self.personality_humanity_level();
         let Some(engine) = &mut self.engine else {
+            self.resource_settings_status = "No running internal rchess child; settings will be applied on next engine start".to_string();
+            self.personality_status = format!(
+                "Stored personality for next internal rchess start: RiskLevel={}, HumanityLevel={}",
+                risk_level, humanity_level
+            );
             return;
         };
         let resource_result = send_rchess_resource_options(
@@ -927,13 +943,19 @@ impl RChessGui {
             self.search_granularity,
             self.planned_hash_mb,
             self.avoid_draws,
+            risk_level,
+            humanity_level,
         )
         .and_then(|_| send_rchess_experience_options(engine, &config));
         match resource_result {
             Ok(()) => {
                 self.resource_settings_status = format!(
-                    "Applied to internal rchess: deterministic_multithread={}, max_threads={}, granularity={}, Hash={} MB, AvoidDraws={}, experience_book={}",
-                    self.deterministic_multithread, self.planned_threads, self.search_granularity, self.planned_hash_mb, self.avoid_draws, self.experience_book_enabled
+                    "Applied to internal rchess: deterministic_multithread={}, max_threads={}, granularity={}, Hash={} MB, AvoidDraws={}, RiskLevel={}, HumanityLevel={}, experience_book={}",
+                    self.deterministic_multithread, self.planned_threads, self.search_granularity, self.planned_hash_mb, self.avoid_draws, risk_level, humanity_level, self.experience_book_enabled
+                );
+                self.personality_status = format!(
+                    "Personality applied: risk={:.2} (RiskLevel={}), humanity={:.2} (HumanityLevel={})",
+                    self.personality_risk, risk_level, self.personality_humanity, humanity_level
                 );
                 self.experience_status = format!(
                     "Experience config applied: enabled={}, path={}, min_games={}, tolerance={} cp",
@@ -1025,6 +1047,20 @@ impl RChessGui {
             score_tolerance_cp: self.experience_score_tolerance_cp,
         }
         .normalized()
+    }
+
+    fn personality_risk_level(&self) -> i32 {
+        normalized_personality_axis(self.personality_risk)
+    }
+
+    fn personality_humanity_level(&self) -> i32 {
+        normalized_personality_axis(self.personality_humanity)
+    }
+
+    fn reset_engine_personality(&mut self) {
+        self.personality_risk = 0.0;
+        self.personality_humanity = 0.0;
+        self.personality_status = "Engine personality reset to neutral: RiskLevel=0, HumanityLevel=0".to_string();
     }
 
     fn append_current_match_to_experience_book(&mut self) {
@@ -1135,6 +1171,8 @@ impl RChessGui {
             self.search_granularity,
             self.planned_hash_mb,
             self.avoid_draws,
+            self.personality_risk_level(),
+            self.personality_humanity_level(),
             &self.experience_config(),
             &self.match_white_options,
         ) {
@@ -1149,6 +1187,8 @@ impl RChessGui {
             self.search_granularity,
             self.planned_hash_mb,
             self.avoid_draws,
+            self.personality_risk_level(),
+            self.personality_humanity_level(),
             &self.experience_config(),
             &self.match_black_options,
         ) {
@@ -1443,6 +1483,8 @@ impl RChessGui {
                 self.search_granularity,
                 self.planned_hash_mb,
                 false,
+                0,
+                0,
             );
         }
 
@@ -2092,6 +2134,10 @@ impl RChessGui {
                     self.show_board_appearance_panel(ui);
                 });
 
+                ui.collapsing("Engine personality", |ui| {
+                    self.show_engine_personality_settings(ui);
+                });
+
                 ui.collapsing("Engine backend", |ui| {
                     egui::ComboBox::from_id_salt("engine_backend")
                         .selected_text(self.engine_backend.label())
@@ -2341,6 +2387,29 @@ impl RChessGui {
             PiecePreset::Letters => PieceGlyphSet::letters().glyph(piece).to_string(),
             PiecePreset::Custom => self.custom_piece_glyphs.glyph(piece).to_string(),
         }
+    }
+
+    fn show_engine_personality_settings(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Engine character");
+        ui.label("Active for the internal rchess backend. GUI values use -1.00..1.00 and are sent to UCI as -100..100 spin options.");
+        ui.add(egui::Slider::new(&mut self.personality_risk, -1.0..=1.0).text("cautious <-> risky"));
+        ui.small("Positive risk gives small root bonuses to checks, attacks and speculative sacrifices. Negative risk penalizes unsafe king exposure and bad exchanges more strongly.");
+        ui.add(egui::Slider::new(&mut self.personality_humanity, -1.0..=1.0).text("engine-like <-> human-like"));
+        ui.small("Positive humanity can deterministically pick occasional inaccurate human-style alternatives. Negative values stay engine-like and do not add mistakes yet.");
+        ui.monospace(format!(
+            "RiskLevel={}  HumanityLevel={}",
+            self.personality_risk_level(),
+            self.personality_humanity_level()
+        ));
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Apply to running rchess child").clicked() {
+                self.send_primary_engine_resource_options();
+            }
+            if ui.button("Reset neutral").clicked() {
+                self.reset_engine_personality();
+            }
+        });
+        ui.label(&self.personality_status);
     }
 
     fn show_engine_resource_settings(&mut self, ui: &mut egui::Ui) {
@@ -3312,6 +3381,10 @@ impl Drop for UciEngine {
     }
 }
 
+fn normalized_personality_axis(value: f32) -> i32 {
+    (value.clamp(-1.0, 1.0) * 100.0).round() as i32
+}
+
 fn color_row(ui: &mut egui::Ui, label: &str, color: &mut egui::Color32) {
     ui.horizontal(|ui| {
         ui.label(label);
@@ -3327,6 +3400,8 @@ fn send_rchess_resource_options(
     granularity: u16,
     hash_mb: u32,
     avoid_draws: bool,
+    risk_level: i32,
+    humanity_level: i32,
 ) -> std::io::Result<()> {
     engine.send(&format!(
         "setoption name deterministic_multithread value {}",
@@ -3336,6 +3411,8 @@ fn send_rchess_resource_options(
     engine.send(&format!("setoption name granularity value {}", granularity.max(1)))?;
     engine.send(&format!("setoption name Hash value {}", hash_mb.max(1)))?;
     engine.send(&format!("setoption name AvoidDraws value {}", avoid_draws))?;
+    engine.send(&format!("setoption name RiskLevel value {}", risk_level.clamp(-100, 100)))?;
+    engine.send(&format!("setoption name HumanityLevel value {}", humanity_level.clamp(-100, 100)))?;
     Ok(())
 }
 
@@ -3361,6 +3438,8 @@ fn send_match_engine_startup_options(
     granularity: u16,
     hash_mb: u32,
     avoid_draws: bool,
+    risk_level: i32,
+    humanity_level: i32,
     experience: &ExperienceConfig,
     extra_options: &str,
 ) -> Result<(), String> {
@@ -3372,6 +3451,8 @@ fn send_match_engine_startup_options(
             granularity,
             hash_mb,
             avoid_draws,
+            risk_level,
+            humanity_level,
         )
         .map_err(|error| error.to_string())?;
         send_rchess_experience_options(engine, experience).map_err(|error| error.to_string())?;
