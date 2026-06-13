@@ -71,6 +71,128 @@ impl PiecePreset {
     }
 }
 
+
+const BUILTIN_ENGINE_PRESET_INDEX: usize = 0;
+
+#[derive(Clone)]
+struct EnginePresetSettings {
+    search_depth: u8,
+    deterministic_multithread: bool,
+    max_threads: u16,
+    granularity: u16,
+    hash_mb: u32,
+    avoid_draws: bool,
+    risk: f32,
+    humanity: f32,
+    experience_book_enabled: bool,
+    experience_book_path: String,
+    experience_min_games: u32,
+    experience_score_tolerance_cp: i32,
+    extra_uci_options: String,
+}
+
+impl EnginePresetSettings {
+    fn default_rchess(default_threads: u16) -> Self {
+        let experience = ExperienceConfig::default();
+        Self {
+            search_depth: 4,
+            deterministic_multithread: default_threads > 1,
+            max_threads: default_threads,
+            granularity: 1,
+            hash_mb: 64,
+            avoid_draws: false,
+            risk: 0.0,
+            humanity: 0.0,
+            experience_book_enabled: false,
+            experience_book_path: experience.path.clone(),
+            experience_min_games: experience.min_games,
+            experience_score_tolerance_cp: experience.score_tolerance_cp,
+            extra_uci_options: String::new(),
+        }
+        .normalized()
+    }
+
+    fn normalized(mut self) -> Self {
+        self.search_depth = self.search_depth.clamp(1, 8);
+        self.max_threads = self.max_threads.clamp(1, 32);
+        self.granularity = self.granularity.clamp(1, 16);
+        self.hash_mb = self.hash_mb.clamp(1, 4096);
+        self.risk = self.risk.clamp(-1.0, 1.0);
+        self.humanity = self.humanity.clamp(-1.0, 1.0);
+        self.experience_min_games = self.experience_min_games.clamp(1, 10_000);
+        self.experience_score_tolerance_cp = self.experience_score_tolerance_cp.clamp(0, 1000);
+        self
+    }
+
+    fn from_gui(app: &RChessGui) -> Self {
+        Self {
+            search_depth: app.search_depth,
+            deterministic_multithread: app.deterministic_multithread,
+            max_threads: app.planned_threads,
+            granularity: app.search_granularity,
+            hash_mb: app.planned_hash_mb,
+            avoid_draws: app.avoid_draws,
+            risk: app.personality_risk,
+            humanity: app.personality_humanity,
+            experience_book_enabled: app.experience_book_enabled,
+            experience_book_path: app.experience_book_path.clone(),
+            experience_min_games: app.experience_min_games,
+            experience_score_tolerance_cp: app.experience_score_tolerance_cp,
+            extra_uci_options: String::new(),
+        }
+        .normalized()
+    }
+
+    fn experience_config(&self) -> ExperienceConfig {
+        ExperienceConfig {
+            enabled: self.experience_book_enabled,
+            path: self.experience_book_path.clone(),
+            min_games: self.experience_min_games,
+            score_tolerance_cp: self.experience_score_tolerance_cp,
+        }
+        .normalized()
+    }
+}
+
+#[derive(Clone)]
+struct EnginePreset {
+    name: String,
+    avatar: String,
+    description: String,
+    settings: EnginePresetSettings,
+}
+
+impl EnginePreset {
+    fn builtin_default(default_threads: u16) -> Self {
+        Self {
+            name: "Default rchess".to_string(),
+            avatar: "♟".to_string(),
+            description: "Neutral internal rchess configuration. This preset is always available and is not saved to the custom library.".to_string(),
+            settings: EnginePresetSettings::default_rchess(default_threads),
+        }
+    }
+
+    fn draft_from_current(name: String, app: &RChessGui) -> Self {
+        Self {
+            name,
+            avatar: String::new(),
+            description: String::new(),
+            settings: EnginePresetSettings::from_gui(app),
+        }
+    }
+
+    fn label(&self) -> String {
+        let avatar = self.avatar.trim();
+        if avatar.is_empty() {
+            self.name.clone()
+        } else if looks_like_image_path(avatar) {
+            format!("image · {}", self.name)
+        } else {
+            format!("{} {}", avatar, self.name)
+        }
+    }
+}
+
 #[derive(Clone)]
 struct PieceGlyphSet {
     white_king: String,
@@ -221,12 +343,20 @@ struct RChessGui {
     personality_risk: f32,
     personality_humanity: f32,
     personality_status: String,
+    engine_presets: Vec<EnginePreset>,
+    active_engine_preset: usize,
+    engine_preset_draft: EnginePreset,
+    engine_preset_edit_index: Option<usize>,
+    engine_preset_path: String,
+    engine_preset_status: String,
     resource_settings_status: String,
     experience_book_enabled: bool,
     experience_book_path: String,
     experience_min_games: u32,
     experience_score_tolerance_cp: i32,
     experience_status: String,
+    match_white_preset: usize,
+    match_black_preset: usize,
     match_white_path: String,
     match_black_path: String,
     match_white_depth: u8,
@@ -318,6 +448,24 @@ impl RChessGui {
             format!("Stockfish 10 candidate: {detected_stockfish10}")
         };
         let default_threads = default_parallel_threads();
+        let engine_preset_path = default_engine_preset_path();
+        let (engine_presets, engine_preset_status) = match load_engine_presets_from_path(&engine_preset_path, default_threads) {
+            Ok(presets) => {
+                let custom_count = presets.len().saturating_sub(1);
+                (
+                    presets,
+                    format!("Loaded {custom_count} custom engine preset(s) from {engine_preset_path}"),
+                )
+            }
+            Err(error) => (
+                vec![EnginePreset::builtin_default(default_threads)],
+                format!("Preset library not loaded: {error}"),
+            ),
+        };
+        let engine_preset_draft = engine_presets
+            .get(BUILTIN_ENGINE_PRESET_INDEX)
+            .cloned()
+            .unwrap_or_else(|| EnginePreset::builtin_default(default_threads));
         let mut app = Self {
             fen_input: STARTPOS_FEN.to_string(),
             game_start_fen: STARTPOS_FEN.to_string(),
@@ -359,12 +507,20 @@ impl RChessGui {
             personality_risk: 0.0,
             personality_humanity: 0.0,
             personality_status: "Engine personality is neutral: RiskLevel=0, HumanityLevel=0".to_string(),
+            engine_presets,
+            active_engine_preset: BUILTIN_ENGINE_PRESET_INDEX,
+            engine_preset_draft,
+            engine_preset_edit_index: None,
+            engine_preset_path,
+            engine_preset_status,
             resource_settings_status: format!("Internal rchess defaults: deterministic_multithread={}, max_threads={}, granularity=1, Hash=64 MB, RiskLevel=0, HumanityLevel=0", default_threads > 1, default_threads),
             experience_book_enabled: false,
             experience_book_path: ExperienceConfig::default().path,
             experience_min_games: ExperienceConfig::default().min_games,
             experience_score_tolerance_cp: ExperienceConfig::default().score_tolerance_cp,
             experience_status: "Experience book is disabled".to_string(),
+            match_white_preset: BUILTIN_ENGINE_PRESET_INDEX,
+            match_black_preset: BUILTIN_ENGINE_PRESET_INDEX,
             match_white_path: String::new(),
             match_black_path: String::new(),
             match_white_depth: 3,
@@ -823,7 +979,7 @@ impl RChessGui {
                 let current = env::current_exe()
                     .map_err(|error| format!("cannot locate current executable: {error}"))?;
                 Ok(UciCommand {
-                    label: EngineBackend::RChess.label().to_string(),
+                    label: format!("rchess preset: {}", self.engine_preset_label(self.active_engine_preset)),
                     program: current,
                     args: vec!["--engine-mode".to_string()],
                     is_internal_rchess: true,
@@ -888,17 +1044,9 @@ impl RChessGui {
         let is_internal_rchess = command.is_internal_rchess;
         let (mut engine, rx) = UciEngine::spawn(command)?;
         if is_internal_rchess {
-            let _ = send_rchess_resource_options(
-                &mut engine,
-                self.deterministic_multithread,
-                self.planned_threads,
-                self.search_granularity,
-                self.planned_hash_mb,
-                self.avoid_draws,
-                self.personality_risk_level(),
-                self.personality_humanity_level(),
-            );
-            let _ = send_rchess_experience_options(&mut engine, &self.experience_config());
+            let settings = self.current_gui_engine_settings();
+            send_rchess_all_options_from_settings(&mut engine, &settings)
+                .map_err(|error| format!("internal rchess option error: {error}"))?;
         }
         self.engine = Some(engine);
         self.engine_rx = Some(rx);
@@ -925,9 +1073,9 @@ impl RChessGui {
             self.personality_status = "Personality settings are stored but only affect the internal rchess backend".to_string();
             return;
         }
-        let config = self.experience_config();
-        let risk_level = self.personality_risk_level();
-        let humanity_level = self.personality_humanity_level();
+        let settings = self.current_gui_engine_settings();
+        let risk_level = normalized_personality_axis(settings.risk);
+        let humanity_level = normalized_personality_axis(settings.humanity);
         let Some(engine) = &mut self.engine else {
             self.resource_settings_status = "No running internal rchess child; settings will be applied on next engine start".to_string();
             self.personality_status = format!(
@@ -936,30 +1084,29 @@ impl RChessGui {
             );
             return;
         };
-        let resource_result = send_rchess_resource_options(
-            engine,
-            self.deterministic_multithread,
-            self.planned_threads,
-            self.search_granularity,
-            self.planned_hash_mb,
-            self.avoid_draws,
-            risk_level,
-            humanity_level,
-        )
-        .and_then(|_| send_rchess_experience_options(engine, &config));
-        match resource_result {
+        match send_rchess_all_options_from_settings(engine, &settings) {
             Ok(()) => {
                 self.resource_settings_status = format!(
                     "Applied to internal rchess: deterministic_multithread={}, max_threads={}, granularity={}, Hash={} MB, AvoidDraws={}, RiskLevel={}, HumanityLevel={}, experience_book={}",
-                    self.deterministic_multithread, self.planned_threads, self.search_granularity, self.planned_hash_mb, self.avoid_draws, risk_level, humanity_level, self.experience_book_enabled
+                    settings.deterministic_multithread,
+                    settings.max_threads,
+                    settings.granularity,
+                    settings.hash_mb,
+                    settings.avoid_draws,
+                    risk_level,
+                    humanity_level,
+                    settings.experience_book_enabled
                 );
                 self.personality_status = format!(
                     "Personality applied: risk={:.2} (RiskLevel={}), humanity={:.2} (HumanityLevel={})",
-                    self.personality_risk, risk_level, self.personality_humanity, humanity_level
+                    settings.risk, risk_level, settings.humanity, humanity_level
                 );
                 self.experience_status = format!(
                     "Experience config applied: enabled={}, path={}, min_games={}, tolerance={} cp",
-                    self.experience_book_enabled, self.experience_book_path, self.experience_min_games, self.experience_score_tolerance_cp
+                    settings.experience_book_enabled,
+                    settings.experience_book_path,
+                    settings.experience_min_games,
+                    settings.experience_score_tolerance_cp
                 );
             }
             Err(error) => {
@@ -1063,6 +1210,192 @@ impl RChessGui {
         self.personality_status = "Engine personality reset to neutral: RiskLevel=0, HumanityLevel=0".to_string();
     }
 
+
+    fn current_gui_engine_settings(&self) -> EnginePresetSettings {
+        let mut settings = EnginePresetSettings::from_gui(self);
+        if let Some(preset) = self.engine_presets.get(self.active_engine_preset) {
+            settings.extra_uci_options = preset.settings.extra_uci_options.clone();
+        }
+        settings.normalized()
+    }
+
+    fn apply_engine_settings_to_gui(&mut self, settings: &EnginePresetSettings) {
+        let settings = settings.clone().normalized();
+        self.search_depth = settings.search_depth;
+        self.deterministic_multithread = settings.deterministic_multithread;
+        self.planned_threads = settings.max_threads;
+        self.search_granularity = settings.granularity;
+        self.planned_hash_mb = settings.hash_mb;
+        self.avoid_draws = settings.avoid_draws;
+        self.personality_risk = settings.risk;
+        self.personality_humanity = settings.humanity;
+        self.experience_book_enabled = settings.experience_book_enabled;
+        self.experience_book_path = settings.experience_book_path;
+        self.experience_min_games = settings.experience_min_games;
+        self.experience_score_tolerance_cp = settings.experience_score_tolerance_cp;
+    }
+
+    fn engine_preset_label(&self, index: usize) -> String {
+        self.engine_presets
+            .get(index)
+            .map(|preset| preset.label())
+            .unwrap_or_else(|| "Default rchess".to_string())
+    }
+
+    fn engine_preset_settings(&self, index: usize) -> EnginePresetSettings {
+        self.engine_presets
+            .get(index)
+            .map(|preset| preset.settings.clone().normalized())
+            .unwrap_or_else(|| EnginePresetSettings::default_rchess(default_parallel_threads()))
+    }
+
+    fn apply_engine_preset(&mut self, index: usize) {
+        let index = index.min(self.engine_presets.len().saturating_sub(1));
+        let settings = self.engine_preset_settings(index);
+        self.active_engine_preset = index;
+        self.apply_engine_settings_to_gui(&settings);
+        let label = self.engine_preset_label(index);
+        self.engine_preset_status = format!("Active engine preset: {label}");
+        if self.engine.is_some() && self.engine_backend == EngineBackend::RChess {
+            self.send_primary_engine_resource_options();
+        }
+    }
+
+    fn new_preset_draft_from_current(&mut self) {
+        let next_number = self.engine_presets.len();
+        self.engine_preset_draft = EnginePreset::draft_from_current(format!("Custom rchess {next_number}"), self);
+        self.engine_preset_edit_index = None;
+        self.engine_preset_status = "Preset draft created from current GUI settings".to_string();
+    }
+
+    fn edit_selected_engine_preset(&mut self) {
+        let index = self.active_engine_preset;
+        if index == BUILTIN_ENGINE_PRESET_INDEX {
+            self.engine_preset_draft = EnginePreset::draft_from_current("Custom rchess".to_string(), self);
+            self.engine_preset_status = "Default preset cannot be edited directly; draft created from current settings".to_string();
+            self.engine_preset_edit_index = None;
+            return;
+        }
+        if let Some(preset) = self.engine_presets.get(index).cloned() {
+            self.engine_preset_draft = preset;
+            self.engine_preset_edit_index = Some(index);
+            self.engine_preset_status = format!("Editing preset {}", self.engine_preset_label(index));
+        }
+    }
+
+    fn create_engine_preset_from_draft(&mut self) {
+        let mut preset = self.engine_preset_draft.clone();
+        preset.name = preset.name.trim().to_string();
+        if preset.name.is_empty() {
+            self.engine_preset_status = "Preset name is empty".to_string();
+            return;
+        }
+        preset.avatar = preset.avatar.trim().to_string();
+        let settings = preset.settings.clone().normalized();
+        preset.settings = settings;
+        self.engine_presets.push(preset);
+        self.active_engine_preset = self.engine_presets.len() - 1;
+        self.engine_preset_edit_index = Some(self.active_engine_preset);
+        let settings = self.engine_preset_settings(self.active_engine_preset);
+        self.apply_engine_settings_to_gui(&settings);
+        self.engine_preset_status = format!("Created and selected preset {}", self.engine_preset_label(self.active_engine_preset));
+    }
+
+    fn update_engine_preset_from_draft(&mut self) {
+        let Some(index) = self.engine_preset_edit_index else {
+            self.engine_preset_status = "No custom preset is selected for editing".to_string();
+            return;
+        };
+        if index == BUILTIN_ENGINE_PRESET_INDEX || index >= self.engine_presets.len() {
+            self.engine_preset_status = "Default preset cannot be overwritten".to_string();
+            return;
+        }
+        let mut preset = self.engine_preset_draft.clone();
+        preset.name = preset.name.trim().to_string();
+        if preset.name.is_empty() {
+            self.engine_preset_status = "Preset name is empty".to_string();
+            return;
+        }
+        preset.avatar = preset.avatar.trim().to_string();
+        let settings = preset.settings.clone().normalized();
+        preset.settings = settings;
+        self.engine_presets[index] = preset;
+        self.active_engine_preset = index;
+        let settings = self.engine_preset_settings(index);
+        self.apply_engine_settings_to_gui(&settings);
+        self.engine_preset_status = format!("Updated preset {}", self.engine_preset_label(index));
+    }
+
+    fn delete_selected_engine_preset(&mut self) {
+        let index = self.active_engine_preset;
+        if index == BUILTIN_ENGINE_PRESET_INDEX {
+            self.engine_preset_status = "Default preset cannot be deleted".to_string();
+            return;
+        }
+        if index >= self.engine_presets.len() {
+            self.engine_preset_status = "Selected preset does not exist".to_string();
+            return;
+        }
+        let removed = self.engine_presets.remove(index);
+        self.active_engine_preset = BUILTIN_ENGINE_PRESET_INDEX;
+        self.match_white_preset = self.match_white_preset.min(self.engine_presets.len().saturating_sub(1));
+        self.match_black_preset = self.match_black_preset.min(self.engine_presets.len().saturating_sub(1));
+        self.engine_preset_edit_index = None;
+        let settings = self.engine_preset_settings(BUILTIN_ENGINE_PRESET_INDEX);
+        self.apply_engine_settings_to_gui(&settings);
+        self.engine_preset_status = format!("Deleted preset {}", removed.name);
+    }
+
+    fn save_engine_preset_library(&mut self) {
+        let path = normalize_path_input(&self.engine_preset_path);
+        if path.is_empty() {
+            self.engine_preset_status = "Preset library path is empty".to_string();
+            return;
+        }
+        match save_engine_presets_to_path(&path, &self.engine_presets) {
+            Ok(()) => {
+                self.engine_preset_path = path.clone();
+                self.engine_preset_status = format!("Saved custom engine presets to {path}");
+            }
+            Err(error) => self.engine_preset_status = format!("Preset save error: {error}"),
+        }
+    }
+
+    fn load_engine_preset_library(&mut self) {
+        let path = normalize_path_input(&self.engine_preset_path);
+        if path.is_empty() {
+            self.engine_preset_status = "Preset library path is empty".to_string();
+            return;
+        }
+        match load_engine_presets_from_path(&path, default_parallel_threads()) {
+            Ok(presets) => {
+                self.engine_presets = presets;
+                self.active_engine_preset = BUILTIN_ENGINE_PRESET_INDEX;
+                self.match_white_preset = BUILTIN_ENGINE_PRESET_INDEX;
+                self.match_black_preset = BUILTIN_ENGINE_PRESET_INDEX;
+                self.engine_preset_edit_index = None;
+                self.engine_preset_path = path.clone();
+                let settings = self.engine_preset_settings(BUILTIN_ENGINE_PRESET_INDEX);
+                self.apply_engine_settings_to_gui(&settings);
+                self.engine_preset_status = format!("Loaded engine preset library from {path}");
+            }
+            Err(error) => self.engine_preset_status = format!("Preset load error: {error}"),
+        }
+    }
+
+    fn apply_match_preset_power(&mut self, color: Color) {
+        match color {
+            Color::White => {
+                let settings = self.engine_preset_settings(self.match_white_preset);
+                self.match_white_depth = settings.search_depth;
+            }
+            Color::Black => {
+                let settings = self.engine_preset_settings(self.match_black_preset);
+                self.match_black_depth = settings.search_depth;
+            }
+        }
+    }
+
     fn append_current_match_to_experience_book(&mut self) {
         let Some(controller) = &self.match_controller else {
             self.experience_status = "No engine match is available to export".to_string();
@@ -1119,10 +1452,20 @@ impl RChessGui {
 
         let white_limit = SearchLimit::depth_or_movetime(self.match_white_depth, self.match_white_movetime_ms);
         let black_limit = SearchLimit::depth_or_movetime(self.match_black_depth, self.match_black_movetime_ms);
-        let white_name = white_command.label.clone();
-        let black_name = black_command.label.clone();
         let white_is_internal_rchess = white_command.is_internal_rchess;
         let black_is_internal_rchess = black_command.is_internal_rchess;
+        let white_preset_settings = self.engine_preset_settings(self.match_white_preset);
+        let black_preset_settings = self.engine_preset_settings(self.match_black_preset);
+        let white_name = if white_is_internal_rchess {
+            format!("White {}", self.engine_preset_label(self.match_white_preset))
+        } else {
+            white_command.label.clone()
+        };
+        let black_name = if black_is_internal_rchess {
+            format!("Black {}", self.engine_preset_label(self.match_black_preset))
+        } else {
+            black_command.label.clone()
+        };
         let white_slot = UciEngineSlot::new(white_name.clone(), white_command.program.to_string_lossy().to_string())
             .with_args(white_command.args.clone())
             .with_limit(white_limit);
@@ -1166,14 +1509,7 @@ impl RChessGui {
         if let Err(error) = send_match_engine_startup_options(
             &mut white_engine,
             white_is_internal_rchess,
-            self.deterministic_multithread,
-            self.planned_threads,
-            self.search_granularity,
-            self.planned_hash_mb,
-            self.avoid_draws,
-            self.personality_risk_level(),
-            self.personality_humanity_level(),
-            &self.experience_config(),
+            Some(&white_preset_settings),
             &self.match_white_options,
         ) {
             self.match_status = format!("White match option error: {error}");
@@ -1182,14 +1518,7 @@ impl RChessGui {
         if let Err(error) = send_match_engine_startup_options(
             &mut black_engine,
             black_is_internal_rchess,
-            self.deterministic_multithread,
-            self.planned_threads,
-            self.search_granularity,
-            self.planned_hash_mb,
-            self.avoid_draws,
-            self.personality_risk_level(),
-            self.personality_humanity_level(),
-            &self.experience_config(),
+            Some(&black_preset_settings),
             &self.match_black_options,
         ) {
             self.match_status = format!("Black match option error: {error}");
@@ -2134,6 +2463,10 @@ impl RChessGui {
                     self.show_board_appearance_panel(ui);
                 });
 
+                ui.collapsing("Engine constructor", |ui| {
+                    self.show_engine_constructor_panel(ui);
+                });
+
                 ui.collapsing("Engine personality", |ui| {
                     self.show_engine_personality_settings(ui);
                 });
@@ -2387,6 +2720,98 @@ impl RChessGui {
             PiecePreset::Letters => PieceGlyphSet::letters().glyph(piece).to_string(),
             PiecePreset::Custom => self.custom_piece_glyphs.glyph(piece).to_string(),
         }
+    }
+
+    fn show_engine_constructor_panel(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Engine constructor");
+        ui.label("A constructed engine is a saved preset for the internal rchess core: name, avatar, description and UCI/search settings.");
+
+        let mut selected = self.active_engine_preset.min(self.engine_presets.len().saturating_sub(1));
+        egui::ComboBox::from_id_salt("active_engine_preset")
+            .selected_text(self.engine_preset_label(selected))
+            .show_ui(ui, |ui| {
+                for (index, preset) in self.engine_presets.iter().enumerate() {
+                    ui.selectable_value(&mut selected, index, preset.label());
+                }
+            });
+        if selected != self.active_engine_preset {
+            self.apply_engine_preset(selected);
+        }
+
+        if let Some(preset) = self.engine_presets.get(self.active_engine_preset) {
+            ui.group(|ui| {
+                ui.label(egui::RichText::new(preset.label()).strong());
+                if !preset.description.trim().is_empty() {
+                    ui.label(&preset.description);
+                }
+                ui.monospace(format!(
+                    "depth={} threads={} hash={}MB risk={} humanity={} avoid_draws={}",
+                    preset.settings.search_depth,
+                    preset.settings.max_threads,
+                    preset.settings.hash_mb,
+                    normalized_personality_axis(preset.settings.risk),
+                    normalized_personality_axis(preset.settings.humanity),
+                    preset.settings.avoid_draws
+                ));
+                if looks_like_image_path(preset.avatar.trim()) {
+                    ui.small(format!("avatar image path: {}", preset.avatar.trim()));
+                }
+            });
+        }
+
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("New draft from current settings").clicked() {
+                self.new_preset_draft_from_current();
+            }
+            if ui.button("Edit selected").clicked() {
+                self.edit_selected_engine_preset();
+            }
+            if ui.button("Create preset from draft").clicked() {
+                self.create_engine_preset_from_draft();
+            }
+            if ui.button("Update edited preset").clicked() {
+                self.update_engine_preset_from_draft();
+            }
+            if ui.button("Delete selected").clicked() {
+                self.delete_selected_engine_preset();
+            }
+        });
+
+        ui.separator();
+        ui.label(egui::RichText::new("Draft").strong());
+        ui.horizontal(|ui| {
+            ui.label("Name");
+            ui.text_edit_singleline(&mut self.engine_preset_draft.name);
+        });
+        ui.horizontal(|ui| {
+            ui.label("Avatar");
+            ui.text_edit_singleline(&mut self.engine_preset_draft.avatar);
+        });
+        ui.small("Avatar accepts a short text/emoji value or a png/jpg path. Image paths are stored now; actual texture preview can be added later.");
+        ui.add(
+            egui::TextEdit::multiline(&mut self.engine_preset_draft.description)
+                .desired_rows(3)
+                .hint_text("Description"),
+        );
+
+        ui.collapsing("Draft settings", |ui| {
+            show_engine_preset_settings_editor(ui, &mut self.engine_preset_draft.settings);
+        });
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label("Library file");
+            ui.text_edit_singleline(&mut self.engine_preset_path);
+        });
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Load library").clicked() {
+                self.load_engine_preset_library();
+            }
+            if ui.button("Save library").clicked() {
+                self.save_engine_preset_library();
+            }
+        });
+        ui.label(&self.engine_preset_status);
     }
 
     fn show_engine_personality_settings(&mut self, ui: &mut egui::Ui) {
@@ -2693,13 +3118,43 @@ impl RChessGui {
     fn show_engine_match_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("Engine vs engine");
         ui.label(&self.match_status);
-        ui.label("Empty path uses this GUI binary as rchess --engine-mode.");
+        ui.label("Empty path uses this GUI binary as rchess --engine-mode. For empty paths, the selected side preset supplies the internal rchess character/settings.");
+        let mut white_preset = self.match_white_preset.min(self.engine_presets.len().saturating_sub(1));
+        let mut black_preset = self.match_black_preset.min(self.engine_presets.len().saturating_sub(1));
         ui.horizontal(|ui| {
-            ui.label("White");
+            ui.label("White preset");
+            egui::ComboBox::from_id_salt("match_white_engine_preset")
+                .selected_text(self.engine_preset_label(white_preset))
+                .show_ui(ui, |ui| {
+                    for (index, preset) in self.engine_presets.iter().enumerate() {
+                        ui.selectable_value(&mut white_preset, index, preset.label());
+                    }
+                });
+        });
+        if white_preset != self.match_white_preset {
+            self.match_white_preset = white_preset;
+            self.apply_match_preset_power(Color::White);
+        }
+        ui.horizontal(|ui| {
+            ui.label("Black preset");
+            egui::ComboBox::from_id_salt("match_black_engine_preset")
+                .selected_text(self.engine_preset_label(black_preset))
+                .show_ui(ui, |ui| {
+                    for (index, preset) in self.engine_presets.iter().enumerate() {
+                        ui.selectable_value(&mut black_preset, index, preset.label());
+                    }
+                });
+        });
+        if black_preset != self.match_black_preset {
+            self.match_black_preset = black_preset;
+            self.apply_match_preset_power(Color::Black);
+        }
+        ui.horizontal(|ui| {
+            ui.label("White path");
             ui.text_edit_singleline(&mut self.match_white_path);
         });
         ui.horizontal(|ui| {
-            ui.label("Black");
+            ui.label("Black path");
             ui.text_edit_singleline(&mut self.match_black_path);
         });
         ui.separator();
@@ -3385,6 +3840,232 @@ fn normalized_personality_axis(value: f32) -> i32 {
     (value.clamp(-1.0, 1.0) * 100.0).round() as i32
 }
 
+
+fn default_engine_preset_path() -> String {
+    PathBuf::from("rchess-engine-presets.txt")
+        .to_string_lossy()
+        .to_string()
+}
+
+fn looks_like_image_path(value: &str) -> bool {
+    let lower = value.trim().to_ascii_lowercase();
+    lower.ends_with(".png") || lower.ends_with(".jpg") || lower.ends_with(".jpeg")
+}
+
+fn show_engine_preset_settings_editor(ui: &mut egui::Ui, settings: &mut EnginePresetSettings) {
+    settings.search_depth = settings.search_depth.clamp(1, 8);
+    settings.max_threads = settings.max_threads.clamp(1, 32);
+    settings.granularity = settings.granularity.clamp(1, 16);
+    settings.hash_mb = settings.hash_mb.clamp(1, 4096);
+    settings.risk = settings.risk.clamp(-1.0, 1.0);
+    settings.humanity = settings.humanity.clamp(-1.0, 1.0);
+
+    ui.heading("Search");
+    ui.add(egui::Slider::new(&mut settings.search_depth, 1..=8).text("default depth"));
+    ui.checkbox(&mut settings.deterministic_multithread, "deterministic_multithread");
+    ui.add(egui::Slider::new(&mut settings.max_threads, 1..=32).text("max_threads"));
+    ui.add(egui::Slider::new(&mut settings.granularity, 1..=16).text("granularity"));
+    ui.horizontal(|ui| {
+        ui.label("Hash MB");
+        ui.add(egui::DragValue::new(&mut settings.hash_mb).range(1..=4096).speed(16.0));
+    });
+    ui.checkbox(&mut settings.avoid_draws, "Avoid draws");
+
+    ui.separator();
+    ui.heading("Personality");
+    ui.add(egui::Slider::new(&mut settings.risk, -1.0..=1.0).text("cautious <-> risky"));
+    ui.add(egui::Slider::new(&mut settings.humanity, -1.0..=1.0).text("engine-like <-> human-like"));
+    ui.monospace(format!(
+        "RiskLevel={}  HumanityLevel={}",
+        normalized_personality_axis(settings.risk),
+        normalized_personality_axis(settings.humanity)
+    ));
+
+    ui.separator();
+    ui.heading("Experience book");
+    ui.checkbox(&mut settings.experience_book_enabled, "Use experience book");
+    ui.horizontal(|ui| {
+        ui.label("Book file");
+        ui.text_edit_singleline(&mut settings.experience_book_path);
+    });
+    ui.horizontal(|ui| {
+        ui.label("Min games");
+        ui.add(egui::DragValue::new(&mut settings.experience_min_games).range(1..=10_000).speed(1.0));
+        ui.label("Tolerance cp");
+        ui.add(egui::DragValue::new(&mut settings.experience_score_tolerance_cp).range(0..=1000).speed(5.0));
+    });
+
+    ui.separator();
+    ui.heading("Extra UCI options");
+    ui.small("One option per line. These are sent after the built-in rchess options, so they can override a preset when needed.");
+    ui.add(
+        egui::TextEdit::multiline(&mut settings.extra_uci_options)
+            .font(egui::TextStyle::Monospace)
+            .desired_rows(4),
+    );
+}
+
+fn save_engine_presets_to_path(path: &str, presets: &[EnginePreset]) -> Result<(), String> {
+    fs::write(path, engine_presets_to_text(presets)).map_err(|error| error.to_string())
+}
+
+fn load_engine_presets_from_path(path: &str, default_threads: u16) -> Result<Vec<EnginePreset>, String> {
+    let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    Ok(parse_engine_presets_text(&text, default_threads))
+}
+
+fn engine_presets_to_text(presets: &[EnginePreset]) -> String {
+    let mut text = String::from("rchess-engine-presets-v1\n");
+    for preset in presets.iter().skip(1) {
+        let settings = preset.settings.clone().normalized();
+        let fields = [
+            encode_preset_field(&preset.name),
+            encode_preset_field(&preset.avatar),
+            encode_preset_field(&preset.description),
+            settings.search_depth.to_string(),
+            settings.deterministic_multithread.to_string(),
+            settings.max_threads.to_string(),
+            settings.granularity.to_string(),
+            settings.hash_mb.to_string(),
+            settings.avoid_draws.to_string(),
+            format!("{:.3}", settings.risk),
+            format!("{:.3}", settings.humanity),
+            settings.experience_book_enabled.to_string(),
+            encode_preset_field(&settings.experience_book_path),
+            settings.experience_min_games.to_string(),
+            settings.experience_score_tolerance_cp.to_string(),
+            encode_preset_field(&settings.extra_uci_options),
+        ];
+        text.push_str("preset\t");
+        text.push_str(&fields.join("\t"));
+        text.push('\n');
+    }
+    text
+}
+
+fn parse_engine_presets_text(text: &str, default_threads: u16) -> Vec<EnginePreset> {
+    let mut presets = vec![EnginePreset::builtin_default(default_threads)];
+    for line in text.lines() {
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.first().copied() != Some("preset") || fields.len() < 17 {
+            continue;
+        }
+        let mut settings = EnginePresetSettings::default_rchess(default_threads);
+        settings.search_depth = parse_u8_field(fields[4], settings.search_depth);
+        settings.deterministic_multithread = parse_bool_field(fields[5], settings.deterministic_multithread);
+        settings.max_threads = parse_u16_field(fields[6], settings.max_threads);
+        settings.granularity = parse_u16_field(fields[7], settings.granularity);
+        settings.hash_mb = parse_u32_field(fields[8], settings.hash_mb);
+        settings.avoid_draws = parse_bool_field(fields[9], settings.avoid_draws);
+        settings.risk = parse_f32_field(fields[10], settings.risk);
+        settings.humanity = parse_f32_field(fields[11], settings.humanity);
+        settings.experience_book_enabled = parse_bool_field(fields[12], settings.experience_book_enabled);
+        settings.experience_book_path = decode_preset_field(fields[13]);
+        settings.experience_min_games = parse_u32_field(fields[14], settings.experience_min_games);
+        settings.experience_score_tolerance_cp = parse_i32_field(fields[15], settings.experience_score_tolerance_cp);
+        settings.extra_uci_options = decode_preset_field(fields[16]);
+
+        let name = decode_preset_field(fields[1]).trim().to_string();
+        if name.is_empty() {
+            continue;
+        }
+        presets.push(EnginePreset {
+            name,
+            avatar: decode_preset_field(fields[2]).trim().to_string(),
+            description: decode_preset_field(fields[3]),
+            settings: settings.normalized(),
+        });
+    }
+    presets
+}
+
+fn encode_preset_field(value: &str) -> String {
+    let mut out = String::new();
+    for ch in value.chars() {
+        match ch {
+            '%' => out.push_str("%25"),
+            '\t' => out.push_str("%09"),
+            '\n' => out.push_str("%0A"),
+            '\r' => out.push_str("%0D"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+fn decode_preset_field(value: &str) -> String {
+    let mut bytes = Vec::new();
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '%' {
+            let first = chars.next();
+            let second = chars.next();
+            if let (Some(a), Some(b)) = (first, second) {
+                if let (Some(high), Some(low)) = (hex_value(a), hex_value(b)) {
+                    bytes.push(high * 16 + low);
+                    continue;
+                }
+                push_char_utf8(&mut bytes, '%');
+                push_char_utf8(&mut bytes, a);
+                push_char_utf8(&mut bytes, b);
+                continue;
+            }
+            push_char_utf8(&mut bytes, '%');
+            if let Some(a) = first {
+                push_char_utf8(&mut bytes, a);
+            }
+            if let Some(b) = second {
+                push_char_utf8(&mut bytes, b);
+            }
+        } else {
+            push_char_utf8(&mut bytes, ch);
+        }
+    }
+    String::from_utf8_lossy(&bytes).to_string()
+}
+
+fn push_char_utf8(bytes: &mut Vec<u8>, ch: char) {
+    let mut buffer = [0_u8; 4];
+    bytes.extend_from_slice(ch.encode_utf8(&mut buffer).as_bytes());
+}
+
+fn hex_value(ch: char) -> Option<u8> {
+    match ch {
+        '0'..='9' => Some(ch as u8 - b'0'),
+        'a'..='f' => Some(ch as u8 - b'a' + 10),
+        'A'..='F' => Some(ch as u8 - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn parse_bool_field(value: &str, default: bool) -> bool {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => true,
+        "false" | "0" | "no" | "off" => false,
+        _ => default,
+    }
+}
+
+fn parse_u8_field(value: &str, default: u8) -> u8 {
+    value.trim().parse::<u8>().unwrap_or(default)
+}
+
+fn parse_u16_field(value: &str, default: u16) -> u16 {
+    value.trim().parse::<u16>().unwrap_or(default)
+}
+
+fn parse_u32_field(value: &str, default: u32) -> u32 {
+    value.trim().parse::<u32>().unwrap_or(default)
+}
+
+fn parse_i32_field(value: &str, default: i32) -> i32 {
+    value.trim().parse::<i32>().unwrap_or(default)
+}
+
+fn parse_f32_field(value: &str, default: f32) -> f32 {
+    value.trim().parse::<f32>().unwrap_or(default)
+}
+
 fn color_row(ui: &mut egui::Ui, label: &str, color: &mut egui::Color32) {
     ui.horizontal(|ui| {
         ui.label(label);
@@ -3430,32 +4111,43 @@ fn send_rchess_experience_options(engine: &mut UciEngine, config: &ExperienceCon
 }
 
 
+fn send_rchess_resource_options_from_settings(
+    engine: &mut UciEngine,
+    settings: &EnginePresetSettings,
+) -> std::io::Result<()> {
+    let settings = settings.clone().normalized();
+    send_rchess_resource_options(
+        engine,
+        settings.deterministic_multithread,
+        settings.max_threads,
+        settings.granularity,
+        settings.hash_mb,
+        settings.avoid_draws,
+        normalized_personality_axis(settings.risk),
+        normalized_personality_axis(settings.humanity),
+    )
+}
+
+fn send_rchess_all_options_from_settings(
+    engine: &mut UciEngine,
+    settings: &EnginePresetSettings,
+) -> Result<(), String> {
+    let settings = settings.clone().normalized();
+    send_rchess_resource_options_from_settings(engine, &settings).map_err(|error| error.to_string())?;
+    send_rchess_experience_options(engine, &settings.experience_config()).map_err(|error| error.to_string())?;
+    send_uci_option_lines(engine, &settings.extra_uci_options)
+}
+
+
 fn send_match_engine_startup_options(
     engine: &mut UciEngine,
     is_internal_rchess: bool,
-    deterministic_multithread: bool,
-    max_threads: u16,
-    granularity: u16,
-    hash_mb: u32,
-    avoid_draws: bool,
-    risk_level: i32,
-    humanity_level: i32,
-    experience: &ExperienceConfig,
+    rchess_settings: Option<&EnginePresetSettings>,
     extra_options: &str,
 ) -> Result<(), String> {
     if is_internal_rchess {
-        send_rchess_resource_options(
-            engine,
-            deterministic_multithread,
-            max_threads,
-            granularity,
-            hash_mb,
-            avoid_draws,
-            risk_level,
-            humanity_level,
-        )
-        .map_err(|error| error.to_string())?;
-        send_rchess_experience_options(engine, experience).map_err(|error| error.to_string())?;
+        let settings = rchess_settings.ok_or_else(|| "internal rchess preset settings are missing".to_string())?;
+        send_rchess_all_options_from_settings(engine, settings)?;
     }
     send_uci_option_lines(engine, extra_options)
 }

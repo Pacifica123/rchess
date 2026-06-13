@@ -184,7 +184,8 @@ MVP умеет:
 - запускать engine-vs-engine матч из двух реальных UCI-процессов;
 - показывать UCI-лог;
 - анализировать PGN/текущую историю через выбранный UCI backend и считать первичную accuracy сторон;
-- управлять internal rchess resource settings: `deterministic_multithread`, `max_threads`, `granularity` и `Hash` в MB.
+- управлять internal rchess resource settings: `deterministic_multithread`, `max_threads`, `granularity` и `Hash` в MB;
+- создавать пресеты internal rchess через `Engine constructor`: имя, аватар-текст/путь к картинке, описание, характер, ресурсы, experience book и дополнительные UCI options.
 
 Основные действия разнесены: верхняя строка стала меню `File / Game / View / Engine / Match / Analysis`, частые игровые кнопки и legal moves вынесены в левую панель, центр закреплён за доской и шкалой оценки, а справа остался workspace для PGN, appearance, backend, match, анализа и логов.
 
@@ -206,6 +207,8 @@ GUI now separates the actual game history from the currently displayed ply. The 
 A compact evaluation bar is drawn next to the board. If analysis data exists for the displayed ply, the bar uses that analysed score converted to White perspective. Otherwise it falls back to the internal deterministic static evaluation. This is only a visual guide, not a replacement for full search.
 
 The engine resource controls are now active for the internal `rchess` backend. `deterministic_multithread` enables deterministic root-splitting, `max_threads` limits worker count, `granularity` controls root chunk size, and `Hash` allocates the shared atomic transposition table. External UCI engines are not configured through these project-specific controls yet.
+
+Engine presets are GUI-side constructed engines for the internal `rchess` core. A preset stores a display name, avatar string or png/jpg path, description, default depth, resource controls, personality axes, experience-book settings and extra UCI options. Engine-vs-engine can assign a different preset to White and Black when that side uses the empty-path internal backend.
 
 
 ## GUI layout stability
